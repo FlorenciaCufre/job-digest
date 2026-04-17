@@ -1,0 +1,6 @@
+seen_jobs.json
+.env
+__pycache__/
+*.pyc
+.DS_Store
+source_health.json
