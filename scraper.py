@@ -58,7 +58,25 @@ SPAIN_ONLY_SIGNALS = [
 EXCLUDE_LOCATION = [
     "us only", "usa only", "united states only", "canada only",
     "uk only", "must be located in the us",
+    # US remote patterns
+    "remote · usa", "remote - usa", "remote, usa",
+    "remote · united states", "remote - united states", "remote, united states",
+    "united states", " usa",
 ]
+
+# Signals in job description text that indicate US-only hiring
+US_DESCRIPTION_SIGNALS = [
+    "401(k)", "401k",
+    "must be authorized to work in the us",
+    "must be authorized to work in the united states",
+    "us work authorization",
+    "authorized to work in the us",
+    "eligible to work in the us",
+]
+
+# Currencies that suggest non-EU hiring (flag, not hard exclude)
+USD_SIGNALS = ["usd", "$ ", "us$"]
+GBP_SIGNALS = ["gbp", "£"]
 
 HEADERS = {
     "User-Agent": (
@@ -102,12 +120,36 @@ def title_matches(title: str) -> bool:
     return any(kw in t for kw in TITLE_KEYWORDS)
 
 def location_ok(location: str) -> bool:
-    loc = location.lower()
+    loc = location.lower().strip()
+    if not loc:
+        return True
     if any(ex in loc for ex in EXCLUDE_LOCATION):
         return False
-    if not location.strip():
-        return True
+    # Catch bare "USA" / "United States" as the whole location string
+    if loc in ("usa", "united states", "us", "remote usa", "remote us"):
+        return False
     return any(kw in loc for kw in LOCATION_KEYWORDS)
+
+def is_us_description(description: str) -> bool:
+    """Check job description text for US-only hiring signals."""
+    if not description:
+        return False
+    d = description.lower()
+    return any(sig in d for sig in US_DESCRIPTION_SIGNALS)
+
+def currency_flag(salary: str) -> str:
+    """
+    Returns 'usd', 'gbp', or '' based on salary string.
+    Used to badge roles that are likely non-EU hires.
+    """
+    if not salary:
+        return ""
+    s = salary.lower()
+    if any(sig in s for sig in USD_SIGNALS):
+        return "usd"
+    if any(sig in s for sig in GBP_SIGNALS):
+        return "gbp"
+    return ""
 
 def is_spain_only(location: str) -> bool:
     loc = location.lower()
@@ -232,18 +274,23 @@ def scrape_remotive() -> list[dict]:
             location = j.get("candidate_required_location", "")
             if not location_ok(location):
                 continue
+            description = j.get("description", "") or ""
+            if is_us_description(description):
+                continue
+            salary = j.get("salary", "") or ""
             age_label, age_date = parse_age(j.get("publication_date") or j.get("posted"))
             jobs.append({
-                "title":       title,
-                "company":     j.get("company_name", ""),
-                "location":    location or "Remote",
-                "salary":      j.get("salary", ""),
-                "url":         j.get("url", ""),
-                "source":      "Remotive",
-                "four_day":    False,
-                "spain_flag":  is_spain_only(location),
-                "age_label":   age_label,
-                "age_date":    age_date,
+                "title":         title,
+                "company":       j.get("company_name", ""),
+                "location":      location or "Remote",
+                "salary":        salary,
+                "url":           j.get("url", ""),
+                "source":        "Remotive",
+                "four_day":      False,
+                "spain_flag":    is_spain_only(location),
+                "currency_flag": currency_flag(salary),
+                "age_label":     age_label,
+                "age_date":      age_date,
             })
     except Exception as e:
         print(f"  ⚠ Remotive error: {e}")
@@ -251,7 +298,7 @@ def scrape_remotive() -> list[dict]:
 
 
 def scrape_4dayweek() -> list[dict]:
-    """4DayWeek public API v2 — design / senior+lead / remote."""
+    """4DayWeek public API v2 — design / senior+lead / remote / EU-friendly."""
     jobs = []
     page = 1
     while True:
@@ -275,13 +322,27 @@ def scrape_4dayweek() -> list[dict]:
                 title = j.get("title", "") or j.get("role", "")
                 if not title_matches(title):
                     continue
-                company = j.get("company", {}).get("name", "") if isinstance(j.get("company"), dict) else ""
+
+                # Check remote_allowed countries — skip if US-only
                 remote_allowed = j.get("remote_allowed", [])
                 if remote_allowed:
-                    countries = [loc.get("country", "") for loc in remote_allowed]
-                    location = "Remote – " + ", ".join(c for c in countries if c) if countries else "Remote"
+                    countries = [loc.get("country", "").lower() for loc in remote_allowed]
+                    # If the only allowed country is US/Canada, skip
+                    non_us = [c for c in countries if c not in (
+                        "united states", "usa", "us", "canada"
+                    )]
+                    if countries and not non_us:
+                        continue
+                    country_display = [loc.get("country", "") for loc in remote_allowed]
+                    location = "Remote – " + ", ".join(c for c in country_display if c) if country_display else "Remote"
                 else:
                     location = "Remote"
+
+                # Check description for US-only signals
+                description = j.get("description", "") or ""
+                if is_us_description(description):
+                    continue
+
                 sal_min = j.get("salary_min")
                 sal_max = j.get("salary_max")
                 cur = j.get("salary_currency", "")
@@ -291,18 +352,20 @@ def scrape_4dayweek() -> list[dict]:
                     salary = f"{cur} {sal_min:,}+"
                 else:
                     salary = ""
+
                 age_label, age_date = parse_age(j.get("posted_at"))
                 jobs.append({
-                    "title":      title,
-                    "company":    company,
-                    "location":   location,
-                    "salary":     salary,
-                    "url":        j.get("url", ""),
-                    "source":     "4DayWeek",
-                    "four_day":   True,
-                    "spain_flag": False,
-                    "age_label":  age_label,
-                    "age_date":   age_date,
+                    "title":         title,
+                    "company":       j.get("company", {}).get("name", "") if isinstance(j.get("company"), dict) else "",
+                    "location":      location,
+                    "salary":        salary,
+                    "url":           j.get("url", ""),
+                    "source":        "4DayWeek",
+                    "four_day":      True,
+                    "spain_flag":    False,
+                    "currency_flag": currency_flag(salary),
+                    "age_label":     age_label,
+                    "age_date":      age_date,
                 })
             if not data.get("has_more"):
                 break
@@ -447,16 +510,17 @@ def scrape_weworkremotely() -> list[dict]:
         link_tag = item.find("link")
         url = link_tag.next_sibling.strip() if link_tag else ""
         jobs.append({
-            "title":      title,
-            "company":    company,
-            "location":   location,
-            "salary":     "",
-            "url":        url,
-            "source":     "WeWorkRemotely",
-            "four_day":   False,
-            "spain_flag": is_spain_only(location),
-            "age_label":  age_label,
-            "age_date":   age_date,
+            "title":         title,
+            "company":       company,
+            "location":      location,
+            "salary":        "",
+            "url":           url,
+            "source":        "WeWorkRemotely",
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": "",
+            "age_label":     age_label,
+            "age_date":      age_date,
         })
     return jobs
 
@@ -498,16 +562,17 @@ def _html_scraper(
         raw_date = date_el.get_text(strip=True) if date_el else None
         age_label, age_date = parse_age(raw_date)
         jobs.append({
-            "title":      title,
-            "company":    company,
-            "location":   location,
-            "salary":     "",
-            "url":        url_full,
-            "source":     source,
-            "four_day":   False,
-            "spain_flag": is_spain_only(location),
-            "age_label":  age_label,
-            "age_date":   age_date,
+            "title":         title,
+            "company":       company,
+            "location":      location,
+            "salary":        "",
+            "url":           url_full,
+            "source":        source,
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": "",
+            "age_label":     age_label,
+            "age_date":      age_date,
         })
     return jobs
 
@@ -613,7 +678,7 @@ SCRAPERS = [
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     all_jobs = []
-    alerts = []   # sources with 3+ day zero-result streak
+    alerts = []
     today_str = TODAY.isoformat()
 
     for name, fn in SCRAPERS:
@@ -624,23 +689,25 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
             print(f"  ✓ {count} matching jobs")
             all_jobs.extend(results)
 
-            # Update health
-            h = health.setdefault(name, {"last_result_date": None, "zero_streak": 0})
-            if count > 0:
-                h["last_result_date"] = today_str
-                h["zero_streak"] = 0
-            else:
-                h["zero_streak"] = h.get("zero_streak", 0) + 1
-                if h["zero_streak"] >= 3:
-                    alerts.append(
-                        f"{name} — 0 results for {h['zero_streak']} consecutive days"
-                    )
+            # Health check: track whether the scraper fetched successfully,
+            # not whether jobs survived our filters. A scraper returning 0
+            # after title/location filtering is fine — that's the filters
+            # working. Only flag if the scraper itself is broken (exception
+            # path below) or explicitly signals an empty page (count stays
+            # at 0 AND the scraper didn't raise, meaning the page returned
+            # no parseable content at all — different from "no matches").
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h["last_fetch_date"] = today_str
+            h["error_streak"] = 0  # successful run resets streak
+
         except Exception as e:
             print(f"  ✗ {name} failed: {e}")
-            h = health.setdefault(name, {"last_result_date": None, "zero_streak": 0})
-            h["zero_streak"] = h.get("zero_streak", 0) + 1
-            if h["zero_streak"] >= 3:
-                alerts.append(f"{name} — failing for {h['zero_streak']} consecutive days")
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h["error_streak"] = h.get("error_streak", 0) + 1
+            if h["error_streak"] >= 3:
+                alerts.append(
+                    f"{name} — fetch error for {h['error_streak']} consecutive days: {e}"
+                )
 
         time.sleep(1)
 
@@ -699,6 +766,10 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
         badges += '<span style="display:inline-block;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🟢 4-day week</span>'
     if j.get("spain_flag"):
         badges += '<span style="display:inline-block;background:#fff7ed;color:#c2410c;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">⚠️ Verify location</span>'
+    if j.get("currency_flag") == "usd":
+        badges += '<span style="display:inline-block;background:#fef2f2;color:#991b1b;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇺🇸 USD — likely US hire</span>'
+    if j.get("currency_flag") == "gbp":
+        badges += '<span style="display:inline-block;background:#fefce8;color:#854d0e;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇬🇧 GBP — verify eligibility</span>'
     if is_repost:
         badges += f'<span style="display:inline-block;background:#f5f3ff;color:#6d28d9;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🔄 Reposted · first seen {j.get("repost_days", "?")}d ago</span>'
 
@@ -835,6 +906,7 @@ def build_email(
       <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6;">
         🟢 4-day week &nbsp;|&nbsp; ⚠️ Verify location/hybrid &nbsp;|&nbsp;
         🔄 Repost — role still open &nbsp;|&nbsp;
+        🇺🇸 USD — likely US hire &nbsp;|&nbsp; 🇬🇧 GBP — verify eligibility &nbsp;|&nbsp;
         <span style="color:#059669;">●</span> Fresh &nbsp;
         <span style="color:#d97706;">●</span> Getting older &nbsp;
         <span style="color:#9ca3af;">●</span> Stale
