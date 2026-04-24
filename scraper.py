@@ -660,6 +660,163 @@ def scrape_remoterocketship() -> list[dict]:
     )
 
 
+# ── Watchlist scrapers ────────────────────────────────────────────────────────
+#
+# Pre-vetted companies monitored directly. All are confirmed remote-EU or
+# Spain-friendly — location filter is relaxed (defaults to "Remote / EU").
+# Grouped by ATS type for clean parsing.
+
+WATCHLIST = [
+    # Tier 1 — pursue actively
+    {"name": "Hostaway",      "url": "https://careers.hostaway.com",                    "ats": "html",  "tier": 1},
+    {"name": "Pennylane",     "url": "https://jobs.lever.co/pennylane",                 "ats": "lever", "tier": 1},
+    {"name": "Dovetail",      "url": "https://dovetail.com/careers/",                   "ats": "html",  "tier": 1},
+    {"name": "Too Good To Go","url": "https://toogoodtogo.com/en/careers",              "ats": "html",  "tier": 1},
+    {"name": "Doctolib",      "url": "https://careers.doctolib.com",                    "ats": "html",  "tier": 1},
+    {"name": "Pleo",          "url": "https://jobs.ashbyhq.com/pleo",                   "ats": "ashby", "tier": 1},
+    # Tier 2 — monitor, apply when role appears
+    {"name": "Productboard",  "url": "https://www.productboard.com/careers/open-positions/", "ats": "html",  "tier": 2},
+    {"name": "Automattic",    "url": "https://automattic.com/work-with-us/",            "ats": "html",  "tier": 2},
+    {"name": "Synthesia",     "url": "https://www.synthesia.io/careers",                "ats": "html",  "tier": 2},
+    {"name": "Qonto",         "url": "https://jobs.lever.co/qonto",                     "ats": "lever", "tier": 2},
+    {"name": "Alan",          "url": "https://jobs.alan.com",                           "ats": "html",  "tier": 2},
+    {"name": "Attio",         "url": "https://jobs.ashbyhq.com/attio",                  "ats": "ashby", "tier": 2},
+    {"name": "Intercom",      "url": "https://www.intercom.com/careers",                "ats": "html",  "tier": 2},
+    {"name": "Maze",          "url": "https://maze.co/careers/",                        "ats": "html",  "tier": 2},
+    {"name": "TheyDo",        "url": "https://www.theydo.com/careers",                  "ats": "html",  "tier": 2},
+    {"name": "Hotjar",        "url": "https://www.hotjar.com/careers/",                 "ats": "html",  "tier": 2},
+    {"name": "PostHog",       "url": "https://posthog.com/careers",                     "ats": "html",  "tier": 2},
+    {"name": "Apaleo",        "url": "https://www.apaleo.com/company/careers",          "ats": "html",  "tier": 2},
+    # Tier 3 — speculative / founder-led, small teams, rare openings
+    {"name": "Rows",          "url": "https://rows.com/careers",                        "ats": "html",  "tier": 3},
+    {"name": "Raycast",       "url": "https://www.raycast.com/careers",                 "ats": "html",  "tier": 3},
+    {"name": "Readdle",       "url": "https://readdle.com/careers",                     "ats": "html",  "tier": 3},
+    {"name": "Pitch",         "url": "https://pitch.com/careers",                       "ats": "html",  "tier": 3},
+    {"name": "Granola",       "url": "https://www.granola.ai/jobs",                     "ats": "html",  "tier": 3},
+]
+
+WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
+
+
+def _watchlist_job(title, company, url, location, salary, tier) -> dict:
+    """Build a normalised job dict for a watchlist result."""
+    loc = location or "Remote / EU"
+    age_label, age_date = parse_age(None)
+    return {
+        "title":         title,
+        "company":       company,
+        "location":      loc,
+        "salary":        salary or "",
+        "url":           url,
+        "source":        f"Watchlist · {company}",
+        "four_day":      False,
+        "spain_flag":    is_spain_only(loc),
+        "currency_flag": currency_flag(salary or ""),
+        "age_label":     age_label,
+        "age_date":      age_date,
+        "watchlist":     True,
+        "watchlist_tier": tier,
+    }
+
+
+def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list[dict]:
+    slug = base_url.rstrip("/").split("/")[-1]
+    try:
+        r = requests.get(
+            f"https://api.lever.co/v0/postings/{slug}?mode=json",
+            timeout=15,
+        )
+        r.raise_for_status()
+        jobs = []
+        for p in r.json():
+            title = p.get("text", "")
+            if not title_matches(title):
+                continue
+            location = p.get("categories", {}).get("location", "")
+            jobs.append(_watchlist_job(
+                title, company_name,
+                p.get("hostedUrl", base_url),
+                location, "", tier,
+            ))
+        return jobs
+    except Exception as e:
+        print(f"  ⚠ Watchlist Lever ({company_name}): {e}")
+        return []
+
+
+def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list[dict]:
+    slug = base_url.rstrip("/").split("/")[-1]
+    try:
+        r = requests.get(
+            f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+            timeout=15,
+        )
+        r.raise_for_status()
+        jobs = []
+        for p in r.json().get("jobs", []):
+            title = p.get("title", "")
+            if not title_matches(title):
+                continue
+            loc = p.get("location") or p.get("locationName") or ""
+            if isinstance(loc, list):
+                loc = ", ".join(loc)
+            jobs.append(_watchlist_job(
+                title, company_name,
+                p.get("jobUrl", base_url),
+                loc, "", tier,
+            ))
+        return jobs
+    except Exception as e:
+        print(f"  ⚠ Watchlist Ashby ({company_name}): {e}")
+        return []
+
+
+def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]:
+    """Scan anchor text on a careers page for matching titles."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        jobs = []
+        seen_hrefs = set()
+        for a in soup.find_all("a", href=True):
+            title = a.get_text(strip=True)
+            if not title or not title_matches(title):
+                continue
+            href = a["href"]
+            if not href.startswith("http"):
+                from urllib.parse import urljoin
+                href = urljoin(url, href)
+            if href in seen_hrefs:
+                continue
+            seen_hrefs.add(href)
+            jobs.append(_watchlist_job(title, company_name, href, "", "", tier))
+        return jobs
+    except Exception as e:
+        print(f"  ⚠ Watchlist HTML ({company_name}): {e}")
+        return []
+
+
+def scrape_watchlist() -> list[dict]:
+    """Loop through all watchlist companies and return matching roles."""
+    all_jobs = []
+    for company in WATCHLIST:
+        name  = company["name"]
+        url   = company["url"]
+        ats   = company["ats"]
+        tier  = company["tier"]
+        if ats == "lever":
+            jobs = _scrape_lever_watchlist(url, name, tier)
+        elif ats == "ashby":
+            jobs = _scrape_ashby_watchlist(url, name, tier)
+        else:
+            jobs = _scrape_html_watchlist(url, name, tier)
+        print(f"  · {name}: {len(jobs)} match(es)")
+        all_jobs.extend(jobs)
+        time.sleep(0.5)
+    return all_jobs
+
+
 # ── Collect + health check ────────────────────────────────────────────────────
 
 SCRAPERS = [
@@ -674,6 +831,7 @@ SCRAPERS = [
     ("DailyRemote",     scrape_dailyremote),
     ("RemotifyEurope",  scrape_remotify),
     ("RemoteRocketship",scrape_remoterocketship),
+    ("Watchlist",       scrape_watchlist),
 ]
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
@@ -770,6 +928,10 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
         badges += '<span style="display:inline-block;background:#fef2f2;color:#991b1b;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇺🇸 USD — likely US hire</span>'
     if j.get("currency_flag") == "gbp":
         badges += '<span style="display:inline-block;background:#fefce8;color:#854d0e;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇬🇧 GBP — verify eligibility</span>'
+    if j.get("watchlist"):
+        tier  = j.get("watchlist_tier", 2)
+        label = WATCHLIST_TIER_LABELS.get(tier, "📌 Watchlist")
+        badges += f'<span style="display:inline-block;background:#f0fdf4;color:#166534;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">{label} Watchlist</span>'
     if is_repost:
         badges += f'<span style="display:inline-block;background:#f5f3ff;color:#6d28d9;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🔄 Reposted · first seen {j.get("repost_days", "?")}d ago</span>'
 
@@ -927,7 +1089,7 @@ def build_email(
     <!-- Footer -->
     <tr><td style="background:#f9fafb;padding:16px 32px;border-top:1px solid #f3f4f6;">
       <p style="margin:0;font-size:11px;color:#9ca3af;">
-        11 sources &nbsp;|&nbsp; Remote · Spain · Europe &nbsp;|&nbsp;
+        11 sources + 24 watchlist companies &nbsp;|&nbsp; Remote · Spain · Europe &nbsp;|&nbsp;
         Senior &amp; Lead Product Designer only
       </p>
     </td></tr>
