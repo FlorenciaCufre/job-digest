@@ -3,17 +3,23 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (4 APIs + 6 HTML scrapers):
+Sources (4 APIs + 3 HTML scrapers + watchlist):
   APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
-  Scrapers: WeWorkRemotely, EURemoteJobs, WorkingNomads, Nodesk,
-            DailyRemote, RemotifyEurope, RemoteRocketship
+  Scrapers: WeWorkRemotely, WorkingNomads, Nodesk
+  Watchlist: 23 pre-vetted companies via Lever / Ashby / HTML
 
-Features:
-  - Age displayed on every listing
-  - Repost detection (resurfaces after 14+ days with flag)
-  - Spain/hybrid flag
-  - 4-day week badge
-  - Source health check (flags sources with 0 results for 3+ days)
+Changes in this version:
+  - Auto-prune seen_jobs: entries older than 30 days removed at run start
+  - UK/United Kingdom added to hard-exclude location list
+  - Staff / Principal roles separated into a "stretch roles" section
+  - Salary sanity cap: values over 500k hidden (display bug guard)
+  - Retry logic on transient errors (1 retry, 5s wait)
+  - Arbeitnow pagination guard (empty body no longer crashes)
+  - Smarter health check: flags sources with 0 raw results for 7+ days
+  - Silence-breaker email after 3 days of no send
+  - Dead HTML scrapers removed: EURemoteJobs, DailyRemote, RemotifyEurope, RemoteRocketship
+  - Watchlist URLs fixed: Apaleo, Pitch
+  - Source attribution standardised
 """
 
 import os
@@ -29,20 +35,30 @@ from dateutil import parser as dateparser
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-RESEND_API_KEY      = os.environ.get("RESEND_API_KEY", "")
-EMAIL_TO            = os.environ.get("EMAIL_TO", "")
-EMAIL_FROM          = os.environ.get("EMAIL_FROM", "jobs@yourdomain.com")
-SEEN_JOBS_FILE      = Path("seen_jobs.json")       # {job_id: {first_seen, last_seen, count}}
-HEALTH_FILE         = Path("source_health.json")   # {source: {last_result_date, zero_streak}}
-REPOST_DAYS         = 14   # resurface a seen job if reposted after this many days
+RESEND_API_KEY  = os.environ.get("RESEND_API_KEY", "")
+EMAIL_TO        = os.environ.get("EMAIL_TO", "")
+EMAIL_FROM      = os.environ.get("EMAIL_FROM", "jobs@yourdomain.com")
+SEEN_JOBS_FILE  = Path("seen_jobs.json")
+HEALTH_FILE     = Path("source_health.json")
+
+REPOST_DAYS     = 14    # resurface a seen job if reposted after this many days
+PRUNE_DAYS      = 30    # remove seen_jobs entries not seen for this many days
+SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
+SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
 
 TITLE_KEYWORDS = [
     "lead product designer",
     "senior product designer",
     "lead designer",
-    "principal product designer",
     "head of product design",
+]
+
+# Stretch roles — shown in a separate section, lower priority
+STRETCH_TITLE_KEYWORDS = [
+    "principal product designer",
     "staff product designer",
+    "principal designer",
+    "staff designer",
 ]
 
 LOCATION_KEYWORDS = [
@@ -56,15 +72,21 @@ SPAIN_ONLY_SIGNALS = [
 ]
 
 EXCLUDE_LOCATION = [
-    "us only", "usa only", "united states only", "canada only",
-    "uk only", "must be located in the us",
-    # US remote patterns
+    # US
+    "us only", "usa only", "united states only",
+    "must be located in the us",
     "remote · usa", "remote - usa", "remote, usa",
     "remote · united states", "remote - united states", "remote, united states",
     "united states", " usa",
+    # Canada
+    "canada only",
+    # UK — added
+    "uk only", "united kingdom only",
+    "remote · united kingdom", "remote - united kingdom", "remote, united kingdom",
+    "remote · uk", "remote - uk", "remote, uk",
+    "united kingdom",
 ]
 
-# Signals in job description text that indicate US-only hiring
 US_DESCRIPTION_SIGNALS = [
     "401(k)", "401k",
     "must be authorized to work in the us",
@@ -74,7 +96,6 @@ US_DESCRIPTION_SIGNALS = [
     "eligible to work in the us",
 ]
 
-# Currencies that suggest non-EU hiring (flag, not hard exclude)
 USD_SIGNALS = ["usd", "$ ", "us$"]
 GBP_SIGNALS = ["gbp", "£"]
 
@@ -91,9 +112,6 @@ TODAY = datetime.date.today()
 # ── Persistence helpers ───────────────────────────────────────────────────────
 
 def load_seen() -> dict:
-    """
-    Returns {job_id: {"first_seen": "YYYY-MM-DD", "last_seen": "YYYY-MM-DD", "count": int}}
-    """
     if SEEN_JOBS_FILE.exists():
         return json.loads(SEEN_JOBS_FILE.read_text())
     return {}
@@ -109,6 +127,22 @@ def load_health() -> dict:
 def save_health(health: dict):
     HEALTH_FILE.write_text(json.dumps(health, indent=2))
 
+def prune_seen(seen: dict) -> tuple[dict, int]:
+    """Remove entries not seen in the last PRUNE_DAYS days. Returns pruned dict + count removed."""
+    cutoff = TODAY - datetime.timedelta(days=PRUNE_DAYS)
+    pruned = {}
+    removed = 0
+    for jid, record in seen.items():
+        try:
+            last = datetime.date.fromisoformat(record["last_seen"])
+            if last >= cutoff:
+                pruned[jid] = record
+            else:
+                removed += 1
+        except Exception:
+            pruned[jid] = record  # keep if date is unreadable
+    return pruned, removed
+
 # ── Matching helpers ──────────────────────────────────────────────────────────
 
 def job_id(title: str, company: str) -> str:
@@ -119,29 +153,32 @@ def title_matches(title: str) -> bool:
     t = title.lower()
     return any(kw in t for kw in TITLE_KEYWORDS)
 
+def title_is_stretch(title: str) -> bool:
+    t = title.lower()
+    return (not title_matches(title)) and any(kw in t for kw in STRETCH_TITLE_KEYWORDS)
+
+def title_matches_any(title: str) -> bool:
+    """Matches either primary or stretch keywords."""
+    return title_matches(title) or title_is_stretch(title)
+
 def location_ok(location: str) -> bool:
     loc = location.lower().strip()
     if not loc:
         return True
     if any(ex in loc for ex in EXCLUDE_LOCATION):
         return False
-    # Catch bare "USA" / "United States" as the whole location string
-    if loc in ("usa", "united states", "us", "remote usa", "remote us"):
+    if loc in ("usa", "united states", "us", "remote usa", "remote us",
+               "uk", "united kingdom", "remote uk"):
         return False
     return any(kw in loc for kw in LOCATION_KEYWORDS)
 
 def is_us_description(description: str) -> bool:
-    """Check job description text for US-only hiring signals."""
     if not description:
         return False
     d = description.lower()
     return any(sig in d for sig in US_DESCRIPTION_SIGNALS)
 
 def currency_flag(salary: str) -> str:
-    """
-    Returns 'usd', 'gbp', or '' based on salary string.
-    Used to badge roles that are likely non-EU hires.
-    """
     if not salary:
         return ""
     s = salary.lower()
@@ -159,34 +196,41 @@ def is_spain_only(location: str) -> bool:
     has_remote = any(x in loc for x in ["remote", "anywhere", "worldwide", "global"])
     return has_spain and not has_remote
 
+def sanitise_salary(salary: str) -> str:
+    """Return empty string if salary looks like a display bug (> SALARY_MAX)."""
+    if not salary:
+        return ""
+    # Extract the largest number in the string
+    nums = re.findall(r"[\d,]+", salary.replace(",", ""))
+    for n in nums:
+        try:
+            if int(n) > SALARY_MAX:
+                return ""
+        except ValueError:
+            pass
+    return salary
+
 # ── Age helpers ───────────────────────────────────────────────────────────────
 
 def parse_age(posted_at) -> tuple[str, datetime.date | None]:
-    """
-    Accepts ISO string, Unix timestamp (int/float), or relative string.
-    Returns (display_string, date_object_or_None).
-    """
     if not posted_at:
         return "Date unknown", None
 
     date = None
 
-    # Unix timestamp
     if isinstance(posted_at, (int, float)):
         try:
             date = datetime.datetime.utcfromtimestamp(posted_at).date()
         except Exception:
             pass
 
-    # ISO string or human date string
     if date is None and isinstance(posted_at, str):
-        # Relative strings ("3 days ago", "posted last week")
         lower = posted_at.lower().strip()
         today = TODAY
         relative_map = [
             (r"today|just now|less than a day", 0),
             (r"yesterday",                      1),
-            (r"(\d+)\s*day",                    None),   # handled below
+            (r"(\d+)\s*day",                    None),
             (r"a day",                          1),
             (r"a week|1 week",                  7),
             (r"(\d+)\s*week",                   None),
@@ -230,36 +274,49 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
     elif delta <= 20:
         label = f"{delta // 7} weeks ago"
     else:
-        label = date.strftime("%-d %b")   # "3 Apr"
+        label = date.strftime("%-d %b")
 
     return label, date
 
 def age_color(date: datetime.date | None) -> str:
-    """Returns a hex colour for the age badge: green → amber → grey."""
     if date is None:
         return "#9ca3af"
     delta = (TODAY - date).days
     if delta <= 3:
-        return "#059669"   # green — fresh
+        return "#059669"
     if delta <= 10:
-        return "#d97706"   # amber — getting older
-    return "#9ca3af"       # grey — stale
+        return "#d97706"
+    return "#9ca3af"
 
-# ── Fetch helper ──────────────────────────────────────────────────────────────
+# ── Fetch helper with retry ───────────────────────────────────────────────────
 
-def fetch(url: str, timeout: int = 15) -> BeautifulSoup | None:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "html.parser")
-    except Exception as e:
-        print(f"  ⚠ Could not fetch {url}: {e}")
-        return None
+def fetch(url: str, timeout: int = 15, retries: int = 1) -> BeautifulSoup | None:
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            r.raise_for_status()
+            return BeautifulSoup(r.text, "html.parser")
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            # Retry on 429 (rate limit) or 5xx (server error)
+            if attempt < retries and status in (429, 500, 502, 503, 504):
+                print(f"  ↻ Retry {attempt + 1} for {url} (status {status})")
+                time.sleep(5)
+                continue
+            print(f"  ⚠ Could not fetch {url}: {e}")
+            return None
+        except Exception as e:
+            if attempt < retries:
+                print(f"  ↻ Retry {attempt + 1} for {url}: {e}")
+                time.sleep(5)
+                continue
+            print(f"  ⚠ Could not fetch {url}: {e}")
+            return None
+    return None
 
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
 def scrape_remotive() -> list[dict]:
-    """Remotive public API."""
     jobs = []
     try:
         r = requests.get(
@@ -269,7 +326,7 @@ def scrape_remotive() -> list[dict]:
         )
         for j in r.json().get("jobs", []):
             title = j.get("title", "")
-            if not title_matches(title):
+            if not title_matches_any(title):
                 continue
             location = j.get("candidate_required_location", "")
             if not location_ok(location):
@@ -277,7 +334,7 @@ def scrape_remotive() -> list[dict]:
             description = j.get("description", "") or ""
             if is_us_description(description):
                 continue
-            salary = j.get("salary", "") or ""
+            salary = sanitise_salary(j.get("salary", "") or "")
             age_label, age_date = parse_age(j.get("publication_date") or j.get("posted"))
             jobs.append({
                 "title":         title,
@@ -291,6 +348,7 @@ def scrape_remotive() -> list[dict]:
                 "currency_flag": currency_flag(salary),
                 "age_label":     age_label,
                 "age_date":      age_date,
+                "is_stretch":    title_is_stretch(title),
             })
     except Exception as e:
         print(f"  ⚠ Remotive error: {e}")
@@ -298,7 +356,6 @@ def scrape_remotive() -> list[dict]:
 
 
 def scrape_4dayweek() -> list[dict]:
-    """4DayWeek public API v2 — design / senior+lead / remote / EU-friendly."""
     jobs = []
     page = 1
     while True:
@@ -320,25 +377,26 @@ def scrape_4dayweek() -> list[dict]:
                 break
             for j in items:
                 title = j.get("title", "") or j.get("role", "")
-                if not title_matches(title):
+                if not title_matches_any(title):
                     continue
 
-                # Check remote_allowed countries — skip if US-only
                 remote_allowed = j.get("remote_allowed", [])
                 if remote_allowed:
                     countries = [loc.get("country", "").lower() for loc in remote_allowed]
-                    # If the only allowed country is US/Canada, skip
-                    non_us = [c for c in countries if c not in (
-                        "united states", "usa", "us", "canada"
+                    non_eu = [c for c in countries if c not in (
+                        "united states", "usa", "us", "canada",
+                        "united kingdom", "uk",
                     )]
-                    if countries and not non_us:
+                    if countries and not non_eu:
                         continue
                     country_display = [loc.get("country", "") for loc in remote_allowed]
                     location = "Remote – " + ", ".join(c for c in country_display if c) if country_display else "Remote"
                 else:
                     location = "Remote"
 
-                # Check description for US-only signals
+                if not location_ok(location):
+                    continue
+
                 description = j.get("description", "") or ""
                 if is_us_description(description):
                     continue
@@ -352,6 +410,7 @@ def scrape_4dayweek() -> list[dict]:
                     salary = f"{cur} {sal_min:,}+"
                 else:
                     salary = ""
+                salary = sanitise_salary(salary)
 
                 age_label, age_date = parse_age(j.get("posted_at"))
                 jobs.append({
@@ -366,6 +425,7 @@ def scrape_4dayweek() -> list[dict]:
                     "currency_flag": currency_flag(salary),
                     "age_label":     age_label,
                     "age_date":      age_date,
+                    "is_stretch":    title_is_stretch(title),
                 })
             if not data.get("has_more"):
                 break
@@ -378,7 +438,6 @@ def scrape_4dayweek() -> list[dict]:
 
 
 def scrape_himalayas() -> list[dict]:
-    """Himalayas search API — replaces the old HTML scraper."""
     jobs = []
     offset = 0
     while True:
@@ -386,10 +445,10 @@ def scrape_himalayas() -> list[dict]:
             r = requests.get(
                 "https://himalayas.app/jobs/api/search",
                 params={
-                    "q":          "product designer",
-                    "seniority":  "senior,lead",
-                    "limit":      20,
-                    "offset":     offset,
+                    "q":         "product designer",
+                    "seniority": "senior,lead",
+                    "limit":     20,
+                    "offset":    offset,
                 },
                 headers=HEADERS,
                 timeout=15,
@@ -400,24 +459,27 @@ def scrape_himalayas() -> list[dict]:
                 break
             for j in items:
                 title = j.get("title", "")
-                if not title_matches(title):
+                if not title_matches_any(title):
                     continue
                 restrictions = j.get("locationRestrictions", []) or []
                 location = ", ".join(restrictions) if restrictions else "Remote"
                 if not location_ok(location):
                     continue
+                salary = sanitise_salary(_himalayas_salary(j))
                 age_label, age_date = parse_age(j.get("pubDate"))
                 jobs.append({
-                    "title":      title,
-                    "company":    j.get("companyName", ""),
-                    "location":   location,
-                    "salary":     _himalayas_salary(j),
-                    "url":        j.get("applicationLink", ""),
-                    "source":     "Himalayas",
-                    "four_day":   False,
-                    "spain_flag": is_spain_only(location),
-                    "age_label":  age_label,
-                    "age_date":   age_date,
+                    "title":         title,
+                    "company":       j.get("companyName", ""),
+                    "location":      location,
+                    "salary":        salary,
+                    "url":           j.get("applicationLink", ""),
+                    "source":        "Himalayas",
+                    "four_day":      False,
+                    "spain_flag":    is_spain_only(location),
+                    "currency_flag": currency_flag(salary),
+                    "age_label":     age_label,
+                    "age_date":      age_date,
+                    "is_stretch":    title_is_stretch(title),
                 })
             if len(items) < 20:
                 break
@@ -440,7 +502,6 @@ def _himalayas_salary(j: dict) -> str:
 
 
 def scrape_arbeitnow() -> list[dict]:
-    """Arbeitnow free API — pulls directly from ATS systems, EU-focused."""
     jobs = []
     page = 1
     while True:
@@ -450,13 +511,20 @@ def scrape_arbeitnow() -> list[dict]:
                 params={"page": page},
                 timeout=15,
             )
-            data = r.json()
+            # Guard: empty or non-JSON body (happens on last page)
+            if not r.content or not r.content.strip():
+                break
+            try:
+                data = r.json()
+            except ValueError:
+                break
+
             items = data.get("data", [])
             if not items:
                 break
             for j in items:
                 title = j.get("title", "")
-                if not title_matches(title):
+                if not title_matches_any(title):
                     continue
                 if not j.get("remote", False):
                     continue
@@ -465,16 +533,18 @@ def scrape_arbeitnow() -> list[dict]:
                     continue
                 age_label, age_date = parse_age(j.get("created_at") or j.get("date"))
                 jobs.append({
-                    "title":      title,
-                    "company":    j.get("company_name", ""),
-                    "location":   location,
-                    "salary":     "",
-                    "url":        j.get("url", ""),
-                    "source":     "Arbeitnow",
-                    "four_day":   False,
-                    "spain_flag": is_spain_only(location),
-                    "age_label":  age_label,
-                    "age_date":   age_date,
+                    "title":         title,
+                    "company":       j.get("company_name", ""),
+                    "location":      location,
+                    "salary":        "",
+                    "url":           j.get("url", ""),
+                    "source":        "Arbeitnow",
+                    "four_day":      False,
+                    "spain_flag":    is_spain_only(location),
+                    "currency_flag": "",
+                    "age_label":     age_label,
+                    "age_date":      age_date,
+                    "is_stretch":    title_is_stretch(title),
                 })
             if not data.get("links", {}).get("next"):
                 break
@@ -487,7 +557,6 @@ def scrape_arbeitnow() -> list[dict]:
 
 
 def scrape_weworkremotely() -> list[dict]:
-    """WeWorkRemotely Design RSS feed."""
     jobs = []
     soup = fetch("https://weworkremotely.com/categories/remote-design-jobs.rss")
     if not soup:
@@ -499,7 +568,7 @@ def scrape_weworkremotely() -> list[dict]:
         raw = title_tag.text.strip()
         company, title = (raw.split(":", 1) if ":" in raw else ("", raw))
         company, title = company.strip(), title.strip()
-        if not title_matches(title):
+        if not title_matches_any(title):
             continue
         region_tag = item.find("region")
         location = region_tag.text.strip() if region_tag else "Remote"
@@ -521,6 +590,7 @@ def scrape_weworkremotely() -> list[dict]:
             "currency_flag": "",
             "age_label":     age_label,
             "age_date":      age_date,
+            "is_stretch":    title_is_stretch(title),
         })
     return jobs
 
@@ -537,21 +607,20 @@ def _html_scraper(
     default_location: str = "Remote",
     date_sel: str = "",
 ) -> list[dict]:
-    """Generic HTML scraper to reduce repetition across similar boards."""
     jobs = []
     soup = fetch(url)
     if not soup:
         return jobs
     for card in soup.select(card_sel):
-        title_el   = card.select_one(title_sel)
-        company_el = card.select_one(company_sel) if company_sel else None
-        location_el= card.select_one(location_sel) if location_sel else None
-        link_el    = card.select_one(link_sel) if link_sel else None
-        date_el    = card.select_one(date_sel) if date_sel else None
+        title_el    = card.select_one(title_sel)
+        company_el  = card.select_one(company_sel) if company_sel else None
+        location_el = card.select_one(location_sel) if location_sel else None
+        link_el     = card.select_one(link_sel) if link_sel else None
+        date_el     = card.select_one(date_sel) if date_sel else None
         if not title_el:
             continue
         title = title_el.get_text(strip=True)
-        if not title_matches(title):
+        if not title_matches_any(title):
             continue
         location = location_el.get_text(strip=True) if location_el else default_location
         if not location_ok(location):
@@ -573,22 +642,10 @@ def _html_scraper(
             "currency_flag": "",
             "age_label":     age_label,
             "age_date":      age_date,
+            "is_stretch":    title_is_stretch(title),
         })
     return jobs
 
-
-def scrape_euremotejobs() -> list[dict]:
-    return _html_scraper(
-        url="https://euremotejobs.com/jobs/?search=product+designer&post_type=job_listing",
-        source="EURemoteJobs",
-        card_sel=".job_listing, article, [class*='job-listing']",
-        title_sel="h2, h3, .job-title, [class*='title']",
-        company_sel=".company, [class*='company']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Europe / Remote",
-        date_sel="[class*='date'], time",
-    )
 
 def scrape_workingnomads() -> list[dict]:
     return _html_scraper(
@@ -617,105 +674,60 @@ def scrape_nodesk() -> list[dict]:
         date_sel="time, [class*='date']",
     )
 
-def scrape_dailyremote() -> list[dict]:
-    return _html_scraper(
-        url="https://dailyremote.com/remote-design-jobs?search=product+design&location=europe",
-        source="DailyRemote",
-        card_sel=".card, article, [class*='job']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://dailyremote.com",
-        default_location="Europe / Remote",
-        date_sel="time, [class*='date']",
-    )
-
-def scrape_remotify() -> list[dict]:
-    return _html_scraper(
-        url="https://remotifyeurope.com/jobsbycategory/design",
-        source="RemotifyEurope",
-        card_sel="article, .job, [class*='job-card'], li[class*='job']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://remotifyeurope.com",
-        default_location="Europe / Remote",
-        date_sel="time, [class*='date']",
-    )
-
-def scrape_remoterocketship() -> list[dict]:
-    return _html_scraper(
-        url="https://www.remoterocketship.com/country/europe?locations=Europe&sort=DateAdded&keywords=product+designer",
-        source="RemoteRocketship",
-        card_sel="article, [class*='job-card'], [class*='JobCard'], li[class*='job']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://www.remoterocketship.com",
-        default_location="Europe / Remote",
-        date_sel="time, [class*='date']",
-    )
-
 
 # ── Watchlist scrapers ────────────────────────────────────────────────────────
-#
-# Pre-vetted companies monitored directly. All are confirmed remote-EU or
-# Spain-friendly — location filter is relaxed (defaults to "Remote / EU").
-# Grouped by ATS type for clean parsing.
 
 WATCHLIST = [
     # Tier 1 — pursue actively
-    {"name": "Hostaway",      "url": "https://careers.hostaway.com",                    "ats": "html",  "tier": 1},
-    {"name": "Pennylane",     "url": "https://jobs.lever.co/pennylane",                 "ats": "lever", "tier": 1},
-    {"name": "Dovetail",      "url": "https://dovetail.com/careers/",                   "ats": "html",  "tier": 1},
-    {"name": "Too Good To Go","url": "https://toogoodtogo.com/en/careers",              "ats": "html",  "tier": 1},
-    {"name": "Doctolib",      "url": "https://careers.doctolib.com",                    "ats": "html",  "tier": 1},
-    {"name": "Pleo",          "url": "https://jobs.ashbyhq.com/pleo",                   "ats": "ashby", "tier": 1},
+    {"name": "Hostaway",       "url": "https://careers.hostaway.com",                        "ats": "html",  "tier": 1},
+    {"name": "Pennylane",      "url": "https://jobs.lever.co/pennylane",                     "ats": "lever", "tier": 1},
+    {"name": "Dovetail",       "url": "https://dovetail.com/careers/",                       "ats": "html",  "tier": 1},
+    {"name": "Too Good To Go", "url": "https://toogoodtogo.com/en/careers",                  "ats": "html",  "tier": 1},
+    {"name": "Doctolib",       "url": "https://careers.doctolib.com",                        "ats": "html",  "tier": 1},
+    {"name": "Pleo",           "url": "https://jobs.ashbyhq.com/pleo",                       "ats": "ashby", "tier": 1},
     # Tier 2 — monitor, apply when role appears
-    {"name": "Productboard",  "url": "https://www.productboard.com/careers/open-positions/", "ats": "html",  "tier": 2},
-    {"name": "Automattic",    "url": "https://automattic.com/work-with-us/",            "ats": "html",  "tier": 2},
-    {"name": "Synthesia",     "url": "https://www.synthesia.io/careers",                "ats": "html",  "tier": 2},
-    {"name": "Qonto",         "url": "https://jobs.lever.co/qonto",                     "ats": "lever", "tier": 2},
-    {"name": "Alan",          "url": "https://jobs.alan.com",                           "ats": "html",  "tier": 2},
-    {"name": "Attio",         "url": "https://jobs.ashbyhq.com/attio",                  "ats": "ashby", "tier": 2},
-    {"name": "Intercom",      "url": "https://www.intercom.com/careers",                "ats": "html",  "tier": 2},
-    {"name": "Maze",          "url": "https://maze.co/careers/",                        "ats": "html",  "tier": 2},
-    {"name": "TheyDo",        "url": "https://www.theydo.com/careers",                  "ats": "html",  "tier": 2},
-    {"name": "Hotjar",        "url": "https://www.hotjar.com/careers/",                 "ats": "html",  "tier": 2},
-    {"name": "PostHog",       "url": "https://posthog.com/careers",                     "ats": "html",  "tier": 2},
-    {"name": "Apaleo",        "url": "https://www.apaleo.com/company/careers",          "ats": "html",  "tier": 2},
-    # Tier 3 — speculative / founder-led, small teams, rare openings
-    {"name": "Rows",          "url": "https://rows.com/careers",                        "ats": "html",  "tier": 3},
-    {"name": "Raycast",       "url": "https://www.raycast.com/careers",                 "ats": "html",  "tier": 3},
-    {"name": "Readdle",       "url": "https://readdle.com/careers",                     "ats": "html",  "tier": 3},
-    {"name": "Pitch",         "url": "https://pitch.com/careers",                       "ats": "html",  "tier": 3},
-    {"name": "Granola",       "url": "https://www.granola.ai/jobs",                     "ats": "html",  "tier": 3},
+    {"name": "Productboard",   "url": "https://www.productboard.com/careers/open-positions/","ats": "html",  "tier": 2},
+    {"name": "Automattic",     "url": "https://automattic.com/work-with-us/",                "ats": "html",  "tier": 2},
+    {"name": "Synthesia",      "url": "https://www.synthesia.io/careers",                    "ats": "html",  "tier": 2},
+    {"name": "Qonto",          "url": "https://jobs.lever.co/qonto",                         "ats": "lever", "tier": 2},
+    {"name": "Alan",           "url": "https://jobs.alan.com",                               "ats": "html",  "tier": 2},
+    {"name": "Attio",          "url": "https://jobs.ashbyhq.com/attio",                      "ats": "ashby", "tier": 2},
+    {"name": "Intercom",       "url": "https://www.intercom.com/careers",                    "ats": "html",  "tier": 2},
+    {"name": "Maze",           "url": "https://maze.co/careers/",                            "ats": "html",  "tier": 2},
+    {"name": "TheyDo",         "url": "https://www.theydo.com/careers",                      "ats": "html",  "tier": 2},
+    {"name": "Hotjar",         "url": "https://www.hotjar.com/careers/",                     "ats": "html",  "tier": 2},
+    {"name": "PostHog",        "url": "https://posthog.com/careers",                         "ats": "html",  "tier": 2},
+    {"name": "Apaleo",         "url": "https://apaleo.jobs/",                                "ats": "html",  "tier": 2},
+    # Tier 3 — speculative / small teams / rare openings
+    {"name": "Rows",           "url": "https://rows.com/careers",                            "ats": "html",  "tier": 3},
+    {"name": "Raycast",        "url": "https://www.raycast.com/careers",                     "ats": "html",  "tier": 3},
+    {"name": "Readdle",        "url": "https://readdle.com/careers",                         "ats": "html",  "tier": 3},
+    {"name": "Pitch",          "url": "https://pitch.com/jobs",                              "ats": "html",  "tier": 3},
+    {"name": "Granola",        "url": "https://www.granola.ai/jobs",                         "ats": "html",  "tier": 3},
 ]
 
 WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
 
 
 def _watchlist_job(title, company, url, location, salary, tier) -> dict:
-    """Build a normalised job dict for a watchlist result."""
     loc = location or "Remote / EU"
     age_label, age_date = parse_age(None)
+    salary = sanitise_salary(salary or "")
     return {
-        "title":         title,
-        "company":       company,
-        "location":      loc,
-        "salary":        salary or "",
-        "url":           url,
-        "source":        f"Watchlist · {company}",
-        "four_day":      False,
-        "spain_flag":    is_spain_only(loc),
-        "currency_flag": currency_flag(salary or ""),
-        "age_label":     age_label,
-        "age_date":      age_date,
-        "watchlist":     True,
+        "title":          title,
+        "company":        company,
+        "location":       loc,
+        "salary":         salary,
+        "url":            url,
+        "source":         f"Watchlist · {company}",
+        "four_day":       False,
+        "spain_flag":     is_spain_only(loc),
+        "currency_flag":  currency_flag(salary),
+        "age_label":      age_label,
+        "age_date":       age_date,
+        "watchlist":      True,
         "watchlist_tier": tier,
+        "is_stretch":     title_is_stretch(title),
     }
 
 
@@ -730,7 +742,7 @@ def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list
         jobs = []
         for p in r.json():
             title = p.get("text", "")
-            if not title_matches(title):
+            if not title_matches_any(title):
                 continue
             location = p.get("categories", {}).get("location", "")
             jobs.append(_watchlist_job(
@@ -755,7 +767,7 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
         jobs = []
         for p in r.json().get("jobs", []):
             title = p.get("title", "")
-            if not title_matches(title):
+            if not title_matches_any(title):
                 continue
             loc = p.get("location") or p.get("locationName") or ""
             if isinstance(loc, list):
@@ -772,7 +784,6 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
 
 
 def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]:
-    """Scan anchor text on a careers page for matching titles."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
@@ -781,7 +792,7 @@ def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]
         seen_hrefs = set()
         for a in soup.find_all("a", href=True):
             title = a.get_text(strip=True)
-            if not title or not title_matches(title):
+            if not title or not title_matches_any(title):
                 continue
             href = a["href"]
             if not href.startswith("http"):
@@ -798,13 +809,12 @@ def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]
 
 
 def scrape_watchlist() -> list[dict]:
-    """Loop through all watchlist companies and return matching roles."""
     all_jobs = []
     for company in WATCHLIST:
-        name  = company["name"]
-        url   = company["url"]
-        ats   = company["ats"]
-        tier  = company["tier"]
+        name = company["name"]
+        url  = company["url"]
+        ats  = company["ats"]
+        tier = company["tier"]
         if ats == "lever":
             jobs = _scrape_lever_watchlist(url, name, tier)
         elif ats == "ashby":
@@ -820,47 +830,60 @@ def scrape_watchlist() -> list[dict]:
 # ── Collect + health check ────────────────────────────────────────────────────
 
 SCRAPERS = [
-    ("Remotive",        scrape_remotive),
-    ("4DayWeek",        scrape_4dayweek),
-    ("Himalayas",       scrape_himalayas),
-    ("Arbeitnow",       scrape_arbeitnow),
-    ("WeWorkRemotely",  scrape_weworkremotely),
-    ("EURemoteJobs",    scrape_euremotejobs),
-    ("WorkingNomads",   scrape_workingnomads),
-    ("Nodesk",          scrape_nodesk),
-    ("DailyRemote",     scrape_dailyremote),
-    ("RemotifyEurope",  scrape_remotify),
-    ("RemoteRocketship",scrape_remoterocketship),
-    ("Watchlist",       scrape_watchlist),
+    ("Remotive",       scrape_remotive),
+    ("4DayWeek",       scrape_4dayweek),
+    ("Himalayas",      scrape_himalayas),
+    ("Arbeitnow",      scrape_arbeitnow),
+    ("WeWorkRemotely", scrape_weworkremotely),
+    ("WorkingNomads",  scrape_workingnomads),
+    ("Nodesk",         scrape_nodesk),
+    ("Watchlist",      scrape_watchlist),
 ]
+
+# Days of zero raw results before a health alert fires
+ZERO_RESULT_ALERT_DAYS = 7
+
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     all_jobs = []
-    alerts = []
+    alerts   = []
     today_str = TODAY.isoformat()
 
     for name, fn in SCRAPERS:
         print(f"→ {name}...")
+        raw_count = 0
         try:
             results = fn()
-            count = len(results)
-            print(f"  ✓ {count} matching jobs")
+            raw_count = len(results)
+            print(f"  ✓ {raw_count} matching jobs")
             all_jobs.extend(results)
 
-            # Health check: track whether the scraper fetched successfully,
-            # not whether jobs survived our filters. A scraper returning 0
-            # after title/location filtering is fine — that's the filters
-            # working. Only flag if the scraper itself is broken (exception
-            # path below) or explicitly signals an empty page (count stays
-            # at 0 AND the scraper didn't raise, meaning the page returned
-            # no parseable content at all — different from "no matches").
-            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h = health.setdefault(name, {
+                "last_fetch_date":   None,
+                "error_streak":      0,
+                "zero_result_streak": 0,
+            })
             h["last_fetch_date"] = today_str
-            h["error_streak"] = 0  # successful run resets streak
+            h["error_streak"]    = 0
+
+            # Track zero raw result streaks (post-filter, but still useful signal)
+            if raw_count == 0:
+                h["zero_result_streak"] = h.get("zero_result_streak", 0) + 1
+                if h["zero_result_streak"] >= ZERO_RESULT_ALERT_DAYS:
+                    alerts.append(
+                        f"{name} — 0 results for {h['zero_result_streak']} consecutive days "
+                        f"(may be broken or CSS changed)"
+                    )
+            else:
+                h["zero_result_streak"] = 0
 
         except Exception as e:
             print(f"  ✗ {name} failed: {e}")
-            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h = health.setdefault(name, {
+                "last_fetch_date":    None,
+                "error_streak":       0,
+                "zero_result_streak": 0,
+            })
             h["error_streak"] = h.get("error_streak", 0) + 1
             if h["error_streak"] >= 3:
                 alerts.append(
@@ -877,12 +900,6 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
 def process_jobs(
     jobs: list[dict], seen: dict
 ) -> tuple[list[dict], list[dict], dict]:
-    """
-    Returns:
-      new_jobs    — never seen before
-      repost_jobs — seen before but reposted after REPOST_DAYS
-      updated_seen
-    """
     new_jobs    = []
     repost_jobs = []
     today_str   = TODAY.isoformat()
@@ -903,13 +920,11 @@ def process_jobs(
             days_since = (TODAY - last).days
 
             if days_since >= REPOST_DAYS:
-                # Resurface as repost
                 job["repost_days"] = (
                     TODAY - datetime.date.fromisoformat(record["first_seen"])
                 ).days
                 repost_jobs.append(job)
 
-            # Always update last_seen and count
             record["last_seen"] = today_str
             record["count"] = record.get("count", 1) + 1
 
@@ -970,33 +985,47 @@ def build_email(
     new_jobs: list[dict],
     repost_jobs: list[dict],
     alerts: list[str],
+    is_silence_breaker: bool = False,
 ) -> str:
     today_str = TODAY.strftime("%A, %d %B %Y")
-    total = len(new_jobs) + len(repost_jobs)
+
+    # Split primary vs stretch
+    new_primary  = [j for j in new_jobs    if not j.get("is_stretch")]
+    new_stretch  = [j for j in new_jobs    if j.get("is_stretch")]
+    rep_primary  = [j for j in repost_jobs if not j.get("is_stretch")]
+    rep_stretch  = [j for j in repost_jobs if j.get("is_stretch")]
 
     four_day_count = sum(1 for j in new_jobs + repost_jobs if j.get("four_day"))
     spain_count    = sum(1 for j in new_jobs + repost_jobs if j.get("spain_flag"))
 
     # Summary pills
-    pills = f"""
-    <span style="background:#f0fdf4;color:#166534;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
-      {len(new_jobs)} new role{"s" if len(new_jobs) != 1 else ""}
-    </span>"""
-    if repost_jobs:
-        pills += f"""
-    &nbsp;<span style="background:#f5f3ff;color:#6d28d9;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
-      🔄 {len(repost_jobs)} reposted
-    </span>"""
-    if four_day_count:
-        pills += f"""
-    &nbsp;<span style="background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
-      🟢 {four_day_count} × 4-day week
-    </span>"""
-    if spain_count:
-        pills += f"""
-    &nbsp;<span style="background:#fff7ed;color:#c2410c;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
-      ⚠️ {spain_count} × verify location
-    </span>"""
+    if is_silence_breaker:
+        pills = '<span style="background:#f0fdf4;color:#166534;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">✅ Scraper healthy — nothing new today</span>'
+    else:
+        pills = f"""
+        <span style="background:#f0fdf4;color:#166534;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          {len(new_primary)} new role{"s" if len(new_primary) != 1 else ""}
+        </span>"""
+        if new_stretch:
+            pills += f"""
+        &nbsp;<span style="background:#f5f3ff;color:#7c3aed;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          🔭 {len(new_stretch)} stretch
+        </span>"""
+        if repost_jobs:
+            pills += f"""
+        &nbsp;<span style="background:#f5f3ff;color:#6d28d9;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          🔄 {len(repost_jobs)} reposted
+        </span>"""
+        if four_day_count:
+            pills += f"""
+        &nbsp;<span style="background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          🟢 {four_day_count} × 4-day week
+        </span>"""
+        if spain_count:
+            pills += f"""
+        &nbsp;<span style="background:#fff7ed;color:#c2410c;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          ⚠️ {spain_count} × verify location
+        </span>"""
 
     # Alert banner
     alert_html = ""
@@ -1015,20 +1044,19 @@ def build_email(
           </td>
         </tr>"""
 
-    # Job sections
-    def source_section(jobs, label=None, is_repost=False):
+    def source_section(jobs, label=None, is_repost=False, is_stretch_section=False):
         if not jobs:
             return ""
-        # Group by source
         by_source: dict[str, list] = {}
         for j in sorted(jobs, key=lambda x: (not x.get("four_day"), x.get("spain_flag", False))):
             by_source.setdefault(j["source"], []).append(j)
 
+        label_color = "#7c3aed" if is_stretch_section else "#374151"
         html = ""
         if label:
             html += f"""
             <tr><td style="padding:20px 0 4px;">
-              <p style="margin:0;font-size:13px;font-weight:700;color:#374151;
+              <p style="margin:0;font-size:13px;font-weight:700;color:{label_color};
                         text-transform:uppercase;letter-spacing:0.06em;">{label}</p>
             </td></tr>"""
 
@@ -1041,8 +1069,26 @@ def build_email(
                 html += _job_card_html(j, is_repost=is_repost)
         return html
 
-    new_section    = source_section(new_jobs)
-    repost_section = source_section(repost_jobs, label="Reposted roles", is_repost=True)
+    new_section     = source_section(new_primary)
+    stretch_section = source_section(
+        new_stretch + rep_stretch,
+        label="🔭 Stretch roles — worth checking at smaller companies",
+        is_stretch_section=True,
+    )
+    repost_section  = source_section(rep_primary, label="Reposted roles", is_repost=True)
+
+    silence_note = ""
+    if is_silence_breaker:
+        silence_note = """
+        <tr><td style="padding:16px 0 8px;">
+          <p style="margin:0;font-size:13px;color:#6b7280;">
+            No new roles today, but the scraper ran without errors.
+            You'll hear from it again when something new surfaces.
+          </p>
+        </td></tr>"""
+
+    source_count = len(SCRAPERS) - 1  # exclude Watchlist from source count
+    watchlist_count = len(WATCHLIST)
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1068,6 +1114,7 @@ def build_email(
       <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6;">
         🟢 4-day week &nbsp;|&nbsp; ⚠️ Verify location/hybrid &nbsp;|&nbsp;
         🔄 Repost — role still open &nbsp;|&nbsp;
+        🔭 Stretch — Staff/Principal at smaller companies &nbsp;|&nbsp;
         🇺🇸 USD — likely US hire &nbsp;|&nbsp; 🇬🇧 GBP — verify eligibility &nbsp;|&nbsp;
         <span style="color:#059669;">●</span> Fresh &nbsp;
         <span style="color:#d97706;">●</span> Getting older &nbsp;
@@ -1081,15 +1128,17 @@ def build_email(
     <!-- Jobs -->
     <tr><td style="padding:8px 32px 28px;">
       <table width="100%" cellpadding="0" cellspacing="0">
+        {silence_note}
         {new_section}
         {repost_section}
+        {stretch_section}
       </table>
     </td></tr>
 
     <!-- Footer -->
     <tr><td style="background:#f9fafb;padding:16px 32px;border-top:1px solid #f3f4f6;">
       <p style="margin:0;font-size:11px;color:#9ca3af;">
-        11 sources + 24 watchlist companies &nbsp;|&nbsp; Remote · Spain · Europe &nbsp;|&nbsp;
+        {source_count} sources + {watchlist_count} watchlist companies &nbsp;|&nbsp; Remote · Spain · Europe &nbsp;|&nbsp;
         Senior &amp; Lead Product Designer only
       </p>
     </td></tr>
@@ -1101,15 +1150,13 @@ def build_email(
 </html>"""
 
 
+def build_silence_breaker_email() -> str:
+    return build_email([], [], [], is_silence_breaker=True)
+
+
 # ── Send ──────────────────────────────────────────────────────────────────────
 
-def send_email(html: str, new_count: int, repost_count: int):
-    today_str = TODAY.strftime("%d %b %Y")
-    parts = [f"{new_count} new"]
-    if repost_count:
-        parts.append(f"{repost_count} reposted")
-    subject = f"🎨 {' · '.join(parts)} · {today_str}"
-
+def send_email(html: str, subject: str):
     r = requests.post(
         "https://api.resend.com/emails",
         headers={
@@ -1125,7 +1172,7 @@ def send_email(html: str, new_count: int, repost_count: int):
         timeout=15,
     )
     if r.status_code == 200:
-        print(f"✅ Email sent — {new_count} new, {repost_count} reposted")
+        print(f"✅ Email sent: {subject}")
     else:
         print(f"✗ Email failed: {r.status_code} {r.text}")
 
@@ -1139,6 +1186,11 @@ def main():
 
     seen   = load_seen()
     health = load_health()
+
+    # Auto-prune stale seen_jobs entries
+    seen, pruned_count = prune_seen(seen)
+    if pruned_count:
+        print(f"🧹 Pruned {pruned_count} stale entries from seen_jobs (>{PRUNE_DAYS} days old)\n")
     print(f"Previously seen jobs: {len(seen)}\n")
 
     all_jobs, health, alerts = collect_all_jobs(health)
@@ -1153,14 +1205,44 @@ def main():
     new_jobs, repost_jobs, seen = process_jobs(all_jobs, seen)
     save_seen(seen)
 
-    print(f"New: {len(new_jobs)} · Reposted: {len(repost_jobs)}")
+    new_primary = [j for j in new_jobs    if not j.get("is_stretch")]
+    new_stretch = [j for j in new_jobs    if j.get("is_stretch")]
+    print(f"New: {len(new_primary)} primary · {len(new_stretch)} stretch · Reposted: {len(repost_jobs)}")
 
-    if not new_jobs and not repost_jobs and not alerts:
-        print("Nothing to report — no email sent.")
+    today_str = TODAY.strftime("%d %b %Y")
+
+    if new_jobs or repost_jobs or alerts:
+        parts = []
+        if new_primary:
+            parts.append(f"{len(new_primary)} new")
+        if new_stretch:
+            parts.append(f"{len(new_stretch)} stretch")
+        if repost_jobs:
+            parts.append(f"{len(repost_jobs)} reposted")
+        subject = f"🎨 {' · '.join(parts)} · {today_str}"
+        html = build_email(new_jobs, repost_jobs, alerts)
+        send_email(html, subject)
+        health["last_email_date"] = TODAY.isoformat()
+        save_health(health)
         return
 
-    html = build_email(new_jobs, repost_jobs, alerts)
-    send_email(html, len(new_jobs), len(repost_jobs))
+    # Nothing to report — check if silence-breaker is needed
+    last_email_str = health.get("last_email_date")
+    if last_email_str:
+        last_email = datetime.date.fromisoformat(last_email_str)
+        days_silent = (TODAY - last_email).days
+    else:
+        days_silent = SILENCE_DAYS  # treat as overdue if never recorded
+
+    if days_silent >= SILENCE_DAYS:
+        print(f"📭 {days_silent} days since last email — sending silence-breaker.")
+        html    = build_silence_breaker_email()
+        subject = f"✅ Scraper healthy, nothing new · {today_str}"
+        send_email(html, subject)
+        health["last_email_date"] = TODAY.isoformat()
+        save_health(health)
+    else:
+        print(f"Nothing to report — no email sent ({days_silent} day(s) since last send).")
 
 
 if __name__ == "__main__":
