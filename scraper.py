@@ -3,23 +3,17 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (4 APIs + 3 HTML scrapers + watchlist):
+Sources (4 APIs + 12 HTML scrapers + watchlist):
   APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
-  Scrapers: WeWorkRemotely, WorkingNomads, Nodesk
-  Watchlist: 23 pre-vetted companies via Lever / Ashby / HTML
+  Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
+            FreshRemote, StartupJobs, TrulyRemote, UXJobs,
+            DynamiteJobs, RemoteRebellion, SmoothRemote,
+            UIUXDesignerJobs, RemoteInEurope
+  Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
-Changes in this version:
-  - Auto-prune seen_jobs: entries older than 30 days removed at run start
-  - UK/United Kingdom added to hard-exclude location list
-  - Staff / Principal roles separated into a "stretch roles" section
-  - Salary sanity cap: values over 500k hidden (display bug guard)
-  - Retry logic on transient errors (1 retry, 5s wait)
-  - Arbeitnow pagination guard (empty body no longer crashes)
-  - Smarter health check: flags sources with 0 raw results for 7+ days
-  - Silence-breaker email after 3 days of no send
-  - Dead HTML scrapers removed: EURemoteJobs, DailyRemote, RemotifyEurope, RemoteRocketship
-  - Watchlist URLs fixed: Apaleo, Pitch
-  - Source attribution standardised
+Email footer includes manual check links:
+  LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
+  Flexa, WeLoveProduct, DesignJobs.World
 """
 
 import os
@@ -675,6 +669,132 @@ def scrape_nodesk() -> list[dict]:
     )
 
 
+def scrape_freshremote() -> list[dict]:
+    return _html_scraper(
+        url="https://freshremote.work/design-remote-jobs/",
+        source="FreshRemote",
+        card_sel="article, .job, [class*='job-card'], li[class*='job']",
+        title_sel="h2, h3, [class*='title'], a[class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location'], [class*='region']",
+        link_sel="a[href]",
+        base_url="https://freshremote.work",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_startupjobs() -> list[dict]:
+    return _html_scraper(
+        url="https://startup.jobs/?q=senior+product+designer&remote=true",
+        source="StartupJobs",
+        card_sel="[class*='job'], article, li[class*='listing']",
+        title_sel="h2, h3, [class*='title'], a[class*='job']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location'], [class*='remote']",
+        link_sel="a[href]",
+        base_url="https://startup.jobs",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_trulyremote() -> list[dict]:
+    return _html_scraper(
+        url="https://trulyremote.co/?search=senior+product+designer",
+        source="TrulyRemote",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_uxjobs() -> list[dict]:
+    return _html_scraper(
+        url="https://uxjobs.io/",
+        source="UXJobs",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_dynamitejobs() -> list[dict]:
+    return _html_scraper(
+        url="https://dynamitejobs.com/remote-jobs/design/ux-web-design",
+        source="DynamiteJobs",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        base_url="https://dynamitejobs.com",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_remoterebellion() -> list[dict]:
+    return _html_scraper(
+        url="https://remoterebellion.com/remote-design-jobs",
+        source="RemoteRebellion",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        base_url="https://remoterebellion.com",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_smoothremote() -> list[dict]:
+    # locations=5 = Europe filter
+    return _html_scraper(
+        url="https://smoothremote.com/remote-design-jobs?locations=5",
+        source="SmoothRemote",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        base_url="https://smoothremote.com",
+        default_location="Europe / Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_uiuxdesignerjobs() -> list[dict]:
+    return _html_scraper(
+        url="https://uiuxdesignerjobs.com/product-designer-jobs-europe/",
+        source="UIUXDesignerJobs",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        base_url="https://uiuxdesignerjobs.com",
+        default_location="Europe / Remote",
+        date_sel="time, [class*='date']",
+    )
+
+def scrape_remoteineurope() -> list[dict]:
+    return _html_scraper(
+        url="https://remoteineurope.com/",
+        source="RemoteInEurope",
+        card_sel="[class*='job'], article, [class*='listing']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        base_url="https://remoteineurope.com",
+        default_location="Europe / Remote",
+        date_sel="time, [class*='date']",
+    )
+
+
 # ── Watchlist scrapers ────────────────────────────────────────────────────────
 
 WATCHLIST = [
@@ -858,14 +978,23 @@ def scrape_watchlist() -> list[dict]:
 # ── Collect + health check ────────────────────────────────────────────────────
 
 SCRAPERS = [
-    ("Remotive",       scrape_remotive),
-    ("4DayWeek",       scrape_4dayweek),
-    ("Himalayas",      scrape_himalayas),
-    ("Arbeitnow",      scrape_arbeitnow),
-    ("WeWorkRemotely", scrape_weworkremotely),
-    ("WorkingNomads",  scrape_workingnomads),
-    ("Nodesk",         scrape_nodesk),
-    ("Watchlist",      scrape_watchlist),
+    ("Remotive",         scrape_remotive),
+    ("4DayWeek",         scrape_4dayweek),
+    ("Himalayas",        scrape_himalayas),
+    ("Arbeitnow",        scrape_arbeitnow),
+    ("WeWorkRemotely",   scrape_weworkremotely),
+    ("WorkingNomads",    scrape_workingnomads),
+    ("Nodesk",           scrape_nodesk),
+    ("FreshRemote",      scrape_freshremote),
+    ("StartupJobs",      scrape_startupjobs),
+    ("TrulyRemote",      scrape_trulyremote),
+    ("UXJobs",           scrape_uxjobs),
+    ("DynamiteJobs",     scrape_dynamitejobs),
+    ("RemoteRebellion",  scrape_remoterebellion),
+    ("SmoothRemote",     scrape_smoothremote),
+    ("UIUXDesignerJobs", scrape_uiuxdesignerjobs),
+    ("RemoteInEurope",   scrape_remoteineurope),
+    ("Watchlist",        scrape_watchlist),
 ]
 
 # Days of zero raw results before a health alert fires
@@ -1160,6 +1289,67 @@ def build_email(
         {new_section}
         {repost_section}
         {stretch_section}
+      </table>
+    </td></tr>
+
+    <!-- Manual checks -->
+    <tr><td style="padding:0 32px 24px;">
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;color:#374151;
+                text-transform:uppercase;letter-spacing:0.06em;">Also check manually</p>
+      <table cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://www.linkedin.com/jobs/search-results/?currentJobId=4393461497&keywords=%E2%80%98Lead%20product%20designer%E2%80%99&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=drPy10xnXjltv1HQD%2FkLdg%3D%3D&geoId=90009761&distance=0.0&f_TPR=r604800&f_SAL=f_SA_id_225001%3A272001"
+               style="display:inline-block;padding:5px 12px;background:#0a66c2;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              LinkedIn
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://wellfound.com/jobs"
+               style="display:inline-block;padding:5px 12px;background:#111827;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Wellfound
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://app.welcometothejungle.com/jobs"
+               style="display:inline-block;padding:5px 12px;background:#3d1f8c;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Welcome to the Jungle
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://www.glassdoor.es/Empleo/barcelona-senior-product-designer-empleos-SRCH_IL.0,9_IC2547194_KO10,33.htm?sortBy=date_desc"
+               style="display:inline-block;padding:5px 12px;background:#0caa41;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Glassdoor
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://flexa.careers/jobs?q=senior+product+designer"
+               style="display:inline-block;padding:5px 12px;background:#6d28d9;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Flexa
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://weloveproduct.co/"
+               style="display:inline-block;padding:5px 12px;background:#e11d48;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              WeLoveProduct
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://designjobs.world/jobs?q=senior+product+designer&seniority=senior&location_regions%5B%5D=Europe"
+               style="display:inline-block;padding:5px 12px;background:#1e293b;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              DesignJobs.World
+            </a>
+          </td>
+        </tr>
       </table>
     </td></tr>
 
