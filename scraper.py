@@ -3,12 +3,11 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (4 APIs + 12 HTML scrapers + watchlist):
+Sources (4 APIs + 9 HTML scrapers + watchlist):
   APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
   Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
-            FreshRemote, StartupJobs, TrulyRemote, UXJobs,
-            DynamiteJobs, RemoteRebellion, SmoothRemote,
-            UIUXDesignerJobs, RemoteInEurope
+            TrulyRemote, UXJobs, DynamiteJobs,
+            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope
   Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
 Email footer includes manual check links:
@@ -669,34 +668,6 @@ def scrape_nodesk() -> list[dict]:
     )
 
 
-def scrape_freshremote() -> list[dict]:
-    return _html_scraper(
-        url="https://freshremote.work/design-remote-jobs/",
-        source="FreshRemote",
-        card_sel="article, .job, [class*='job-card'], li[class*='job']",
-        title_sel="h2, h3, [class*='title'], a[class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location'], [class*='region']",
-        link_sel="a[href]",
-        base_url="https://freshremote.work",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
-def scrape_startupjobs() -> list[dict]:
-    return _html_scraper(
-        url="https://startup.jobs/?q=senior+product+designer&remote=true",
-        source="StartupJobs",
-        card_sel="[class*='job'], article, li[class*='listing']",
-        title_sel="h2, h3, [class*='title'], a[class*='job']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location'], [class*='remote']",
-        link_sel="a[href]",
-        base_url="https://startup.jobs",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
 def scrape_trulyremote() -> list[dict]:
     return _html_scraper(
         url="https://trulyremote.co/?search=senior+product+designer",
@@ -748,21 +719,6 @@ def scrape_remoterebellion() -> list[dict]:
         link_sel="a[href]",
         base_url="https://remoterebellion.com",
         default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
-def scrape_smoothremote() -> list[dict]:
-    # locations=5 = Europe filter
-    return _html_scraper(
-        url="https://smoothremote.com/remote-design-jobs?locations=5",
-        source="SmoothRemote",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://smoothremote.com",
-        default_location="Europe / Remote",
         date_sel="time, [class*='date']",
     )
 
@@ -985,13 +941,10 @@ SCRAPERS = [
     ("WeWorkRemotely",   scrape_weworkremotely),
     ("WorkingNomads",    scrape_workingnomads),
     ("Nodesk",           scrape_nodesk),
-    ("FreshRemote",      scrape_freshremote),
-    ("StartupJobs",      scrape_startupjobs),
     ("TrulyRemote",      scrape_trulyremote),
     ("UXJobs",           scrape_uxjobs),
     ("DynamiteJobs",     scrape_dynamitejobs),
     ("RemoteRebellion",  scrape_remoterebellion),
-    ("SmoothRemote",     scrape_smoothremote),
     ("UIUXDesignerJobs", scrape_uiuxdesignerjobs),
     ("RemoteInEurope",   scrape_remoteineurope),
     ("Watchlist",        scrape_watchlist),
