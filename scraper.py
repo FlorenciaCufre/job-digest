@@ -697,7 +697,7 @@ WATCHLIST = [
     {"name": "TheyDo",         "url": "https://www.theydo.com/careers",                      "ats": "html",  "tier": 2},
     {"name": "Hotjar",         "url": "https://www.hotjar.com/careers/",                     "ats": "html",  "tier": 2},
     {"name": "PostHog",        "url": "https://posthog.com/careers",                         "ats": "html",  "tier": 2},
-    {"name": "Apaleo",         "url": "https://apaleo.jobs/",                                "ats": "html",  "tier": 2},
+    {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",             "ats": "greenhouse", "tier": 2},
     # Tier 3 — speculative / small teams / rare openings
     {"name": "Rows",           "url": "https://rows.com/careers",                            "ats": "html",  "tier": 3},
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                     "ats": "html",  "tier": 3},
@@ -783,6 +783,32 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
         return []
 
 
+def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) -> list[dict]:
+    """Greenhouse job board API — more reliable than scraping the HTML page."""
+    slug = base_url.rstrip("/").split("/")[-1]
+    try:
+        r = requests.get(
+            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+            timeout=15,
+        )
+        r.raise_for_status()
+        jobs = []
+        for p in r.json().get("jobs", []):
+            title = p.get("title", "")
+            if not title_matches_any(title):
+                continue
+            loc = p.get("location", {}).get("name", "") if isinstance(p.get("location"), dict) else ""
+            jobs.append(_watchlist_job(
+                title, company_name,
+                p.get("absolute_url", base_url),
+                loc, "", tier,
+            ))
+        return jobs
+    except Exception as e:
+        print(f"  ⚠ Watchlist Greenhouse ({company_name}): {e}")
+        return []
+
+
 def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -819,6 +845,8 @@ def scrape_watchlist() -> list[dict]:
             jobs = _scrape_lever_watchlist(url, name, tier)
         elif ats == "ashby":
             jobs = _scrape_ashby_watchlist(url, name, tier)
+        elif ats == "greenhouse":
+            jobs = _scrape_greenhouse_watchlist(url, name, tier)
         else:
             jobs = _scrape_html_watchlist(url, name, tier)
         print(f"  · {name}: {len(jobs)} match(es)")
