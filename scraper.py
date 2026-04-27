@@ -682,7 +682,7 @@ WATCHLIST = [
     {"name": "Hostaway",       "url": "https://careers.hostaway.com",                        "ats": "html",  "tier": 1},
     {"name": "Pennylane",      "url": "https://jobs.lever.co/pennylane",                     "ats": "lever", "tier": 1},
     {"name": "Dovetail",       "url": "https://dovetail.com/careers/",                       "ats": "html",  "tier": 1},
-    {"name": "Too Good To Go", "url": "https://toogoodtogo.com/en/careers",                  "ats": "html",  "tier": 1},
+    {"name": "Too Good To Go", "url": "https://job-boards.greenhouse.io/toogoodtogo",         "ats": "greenhouse", "tier": 1},
     {"name": "Doctolib",       "url": "https://careers.doctolib.com",                        "ats": "html",  "tier": 1},
     {"name": "Pleo",           "url": "https://jobs.ashbyhq.com/pleo",                       "ats": "ashby", "tier": 1},
     # Tier 2 — monitor, apply when role appears
