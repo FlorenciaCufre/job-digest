@@ -2,8 +2,8 @@ name: Daily Job Digest
 
 on:
   schedule:
-    # Every weekday at 07:30 UTC (09:30 Barcelona time)
-    - cron: "30 7 * * 1-5"
+    # Every day at 07:30 UTC (09:30 Barcelona time)
+    - cron: "30 7 * * *"
   workflow_dispatch:
 
 env:

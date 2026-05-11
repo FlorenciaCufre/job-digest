@@ -950,8 +950,8 @@ SCRAPERS = [
     ("Watchlist",        scrape_watchlist),
 ]
 
-# Days of zero raw results before a health alert fires
-ZERO_RESULT_ALERT_DAYS = 7
+# Days of consecutive fetch errors before a health alert fires
+ERROR_ALERT_DAYS = 3
 
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
@@ -961,41 +961,20 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
 
     for name, fn in SCRAPERS:
         print(f"→ {name}...")
-        raw_count = 0
         try:
             results = fn()
-            raw_count = len(results)
-            print(f"  ✓ {raw_count} matching jobs")
+            print(f"  ✓ {len(results)} matching jobs")
             all_jobs.extend(results)
 
-            h = health.setdefault(name, {
-                "last_fetch_date":   None,
-                "error_streak":      0,
-                "zero_result_streak": 0,
-            })
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
             h["last_fetch_date"] = today_str
             h["error_streak"]    = 0
 
-            # Track zero raw result streaks (post-filter, but still useful signal)
-            if raw_count == 0:
-                h["zero_result_streak"] = h.get("zero_result_streak", 0) + 1
-                if h["zero_result_streak"] >= ZERO_RESULT_ALERT_DAYS:
-                    alerts.append(
-                        f"{name} — 0 results for {h['zero_result_streak']} consecutive days "
-                        f"(may be broken or CSS changed)"
-                    )
-            else:
-                h["zero_result_streak"] = 0
-
         except Exception as e:
             print(f"  ✗ {name} failed: {e}")
-            h = health.setdefault(name, {
-                "last_fetch_date":    None,
-                "error_streak":       0,
-                "zero_result_streak": 0,
-            })
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
             h["error_streak"] = h.get("error_streak", 0) + 1
-            if h["error_streak"] >= 3:
+            if h["error_streak"] >= ERROR_ALERT_DAYS:
                 alerts.append(
                     f"{name} — fetch error for {h['error_streak']} consecutive days: {e}"
                 )
