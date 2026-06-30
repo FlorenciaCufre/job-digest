@@ -9,7 +9,7 @@ Sources (5 APIs + 13 HTML scrapers + watchlist):
             TrulyRemote, UXJobs, DynamiteJobs,
             RemoteRebellion, UIUXDesignerJobs, RemoteInEurope,
             Dribbble, Jobspresso, Careervault, Remote100K
-  Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
+  Watchlist: 30 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
 Email footer includes manual check links:
   LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
@@ -909,9 +909,18 @@ WATCHLIST = [
     {"name": "Intercom",       "url": "https://www.intercom.com/careers",                    "ats": "html",  "tier": 2},
     {"name": "Maze",           "url": "https://jobs.ashbyhq.com/mazedesign",                 "ats": "ashby", "tier": 2},
     {"name": "TheyDo",         "url": "https://jobs.ashbyhq.com/theydo",                     "ats": "ashby", "tier": 2},
-    {"name": "Hotjar",         "url": "https://job-boards.greenhouse.io/hotjar",             "ats": "greenhouse", "tier": 2},
+    {"name": "Contentsquare",  "url": "https://jobs.lever.co/contentsquare",                 "ats": "lever", "tier": 2},
     {"name": "PostHog",        "url": "https://jobs.ashbyhq.com/posthog",                    "ats": "ashby", "tier": 2},
     {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",             "ats": "greenhouse", "tier": 2},
+    # Tier 1 — travel / hospitality / B2B SaaS, matching CV positioning
+    {"name": "Hopper",         "url": "https://jobs.ashbyhq.com/hopper",                     "ats": "ashby", "tier": 1},
+    {"name": "OLX",            "url": "https://jobs.eu.lever.co/olx",                        "ats": "lever", "tier": 1},
+    {"name": "Vanta",          "url": "https://jobs.ashbyhq.com/vanta",                      "ats": "ashby", "tier": 1},
+    {"name": "n8n",            "url": "https://jobs.ashbyhq.com/n8n",                        "ats": "ashby", "tier": 1},
+    # Tier 2 — design-led B2B SaaS, monitor for senior openings
+    {"name": "Notion",         "url": "https://jobs.ashbyhq.com/notion",                     "ats": "ashby", "tier": 2},
+    {"name": "Linear",         "url": "https://jobs.ashbyhq.com/Linear",                     "ats": "ashby", "tier": 2},
+    {"name": "Superhuman",     "url": "https://jobs.ashbyhq.com/superhuman",                 "ats": "ashby", "tier": 2},
     # Tier 3 — speculative / small teams / rare openings
     {"name": "Rows",           "url": "https://rows.com/careers",                            "ats": "html",  "tier": 3},
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                     "ats": "html",  "tier": 3},
