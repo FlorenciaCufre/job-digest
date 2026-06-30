@@ -3,16 +3,18 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (4 APIs + 9 HTML scrapers + watchlist):
-  APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
+Sources (5 APIs + 13 HTML scrapers + watchlist):
+  APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow, RemoteOK
   Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
             TrulyRemote, UXJobs, DynamiteJobs,
-            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope
+            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope,
+            Dribbble, Jobspresso, Careervault, Remote100K
   Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
 Email footer includes manual check links:
   LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
-  Flexa, WeLoveProduct, DesignJobs.World
+  Flexa, WeLoveProduct, DesignJobs.World,
+  RemotifyEurope, Jobgether, Remote.co, JustRemote
 """
 
 import os
@@ -751,6 +753,123 @@ def scrape_remoteineurope() -> list[dict]:
     )
 
 
+def scrape_remoteok() -> list[dict]:
+    """RemoteOK public JSON API — no auth required."""
+    jobs = []
+    try:
+        r = requests.get(
+            "https://remoteok.com/api",
+            params={"tag": "design"},
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # First item is a legal notice dict, not a job — skip it
+        for j in data:
+            if not isinstance(j, dict) or "position" not in j:
+                continue
+            title = j.get("position", "")
+            if not title_matches_any(title):
+                continue
+            location = j.get("location", "") or "Remote"
+            if not location_ok(location):
+                continue
+            description = j.get("description", "") or ""
+            if is_us_description(description):
+                continue
+            sal_min = j.get("salary_min")
+            sal_max = j.get("salary_max")
+            if sal_min and sal_max:
+                salary = f"USD {int(sal_min):,} – {int(sal_max):,}"
+            elif sal_min:
+                salary = f"USD {int(sal_min):,}+"
+            else:
+                salary = ""
+            salary = sanitise_salary(salary)
+            # epoch timestamp
+            age_label, age_date = parse_age(j.get("epoch") or j.get("date"))
+            url = j.get("url", "") or f"https://remoteok.com/remote-jobs/{j.get('id', '')}"
+            jobs.append({
+                "title":         title,
+                "company":       j.get("company", ""),
+                "location":      location,
+                "salary":        salary,
+                "url":           url,
+                "source":        "RemoteOK",
+                "four_day":      False,
+                "spain_flag":    is_spain_only(location),
+                "currency_flag": currency_flag(salary),
+                "age_label":     age_label,
+                "age_date":      age_date,
+                "is_stretch":    title_is_stretch(title),
+            })
+    except Exception as e:
+        print(f"  ⚠ RemoteOK error: {e}")
+    return jobs
+
+
+def scrape_dribbble() -> list[dict]:
+    """Dribbble Jobs — design-forward companies, curated listings."""
+    return _html_scraper(
+        url="https://dribbble.com/jobs?location=anywhere&remote=true&title=product+designer",
+        source="Dribbble",
+        card_sel="li.job, [class*='job-listing'], [class*='JobListing'], .js-job",
+        title_sel="h2, h3, [class*='job-title'], [class*='JobTitle']",
+        company_sel="[class*='company'], [class*='Company'], [class*='employer']",
+        location_sel="[class*='location'], [class*='Location']",
+        link_sel="a[href]",
+        base_url="https://dribbble.com",
+        default_location="Remote",
+        date_sel="time, [class*='date'], [class*='Date']",
+    )
+
+
+def scrape_jobspresso() -> list[dict]:
+    """Jobspresso — small but curated remote board."""
+    return _html_scraper(
+        url="https://jobspresso.co/remote-jobs/?s=product+designer",
+        source="Jobspresso",
+        card_sel="[class*='job'], article, li[class*='job']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+
+def scrape_careervault() -> list[dict]:
+    """Careervault — remote-focused, clean listings."""
+    return _html_scraper(
+        url="https://careervault.io/?search=product+designer",
+        source="Careervault",
+        card_sel="[class*='job'], article, [class*='listing'], [class*='card']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+
+def scrape_remote100k() -> list[dict]:
+    """Remote100K — $100K+ filter acts as a seniority signal."""
+    return _html_scraper(
+        url="https://remote100k.com/?search=product+designer",
+        source="Remote100K",
+        card_sel="[class*='job'], article, [class*='listing'], [class*='card']",
+        title_sel="h2, h3, [class*='title']",
+        company_sel="[class*='company'], [class*='employer']",
+        location_sel="[class*='location']",
+        link_sel="a[href]",
+        default_location="Remote",
+        date_sel="time, [class*='date']",
+    )
+
+
 # ── Watchlist scrapers ────────────────────────────────────────────────────────
 
 WATCHLIST = [
@@ -947,6 +1066,11 @@ SCRAPERS = [
     ("RemoteRebellion",  scrape_remoterebellion),
     ("UIUXDesignerJobs", scrape_uiuxdesignerjobs),
     ("RemoteInEurope",   scrape_remoteineurope),
+    ("RemoteOK",         scrape_remoteok),
+    ("Dribbble",         scrape_dribbble),
+    ("Jobspresso",       scrape_jobspresso),
+    ("Careervault",      scrape_careervault),
+    ("Remote100K",       scrape_remote100k),
     ("Watchlist",        scrape_watchlist),
 ]
 
@@ -1279,6 +1403,36 @@ def build_email(
                style="display:inline-block;padding:5px 12px;background:#1e293b;color:#fff;
                       font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
               DesignJobs.World
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://remotifyeurope.com"
+               style="display:inline-block;padding:5px 12px;background:#0369a1;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              RemotifyEurope
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://jobgether.com/"
+               style="display:inline-block;padding:5px 12px;background:#7c2d12;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Jobgether
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://remote.co/remote-jobs/design/"
+               style="display:inline-block;padding:5px 12px;background:#15803d;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Remote.co
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://justremote.co/remote-design-jobs"
+               style="display:inline-block;padding:5px 12px;background:#9a3412;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              JustRemote
             </a>
           </td>
         </tr>
