@@ -40,6 +40,8 @@ REPOST_DAYS     = 14    # resurface a seen job if reposted after this many days
 PRUNE_DAYS      = 30    # remove seen_jobs entries not seen for this many days
 SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
 SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
+MAX_JOB_AGE_DAYS = 21    # hard-drop jobs older than this — safety net for
+                          # sources with unreliable date parsing
 
 TITLE_KEYWORDS = [
     "lead product designer",
@@ -250,7 +252,17 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
                 break
         if not matched:
             try:
-                date = dateparser.parse(posted_at).date()
+                parsed = dateparser.parse(posted_at, dayfirst=False)
+                candidate = parsed.date()
+                # Guard: if treating it as a future date, the month/day are
+                # probably swapped (common with ambiguous "03/06" style strings
+                # from non-US sources) — retry with dayfirst=True.
+                if candidate > today:
+                    parsed_alt = dateparser.parse(posted_at, dayfirst=True)
+                    candidate_alt = parsed_alt.date()
+                    if candidate_alt <= today:
+                        candidate = candidate_alt
+                date = candidate
             except Exception:
                 pass
 
@@ -258,6 +270,13 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
         return "Date unknown", None
 
     delta = (TODAY - date).days
+
+    # Safety net: never show a negative age. If the date still resolves to
+    # the future after the dayfirst retry above, something about the source's
+    # format wasn't recognised — treat as unknown rather than display garbage.
+    if delta < 0:
+        return "Date unknown", None
+
     if delta == 0:
         label = "Today"
     elif delta == 1:
@@ -1108,6 +1127,25 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     return all_jobs, health, alerts
 
 
+def filter_stale_jobs(jobs: list[dict]) -> tuple[list[dict], int]:
+    """Drop jobs older than MAX_JOB_AGE_DAYS. Safety net for sources whose
+    date parsing is unreliable — old listings shouldn't reach the digest
+    regardless of why the date came out wrong. Jobs with no age_date
+    (e.g. watchlist entries, which aren't date-stamped) pass through."""
+    kept = []
+    dropped = 0
+    for j in jobs:
+        age_date = j.get("age_date")
+        if age_date is None:
+            kept.append(j)
+            continue
+        if (TODAY - age_date).days > MAX_JOB_AGE_DAYS:
+            dropped += 1
+            continue
+        kept.append(j)
+    return kept, dropped
+
+
 # ── Deduplication + repost detection ─────────────────────────────────────────
 
 def process_jobs(
@@ -1499,6 +1537,10 @@ def main():
 
     all_jobs, health, alerts = collect_all_jobs(health)
     save_health(health)
+
+    all_jobs, stale_dropped = filter_stale_jobs(all_jobs)
+    if stale_dropped:
+        print(f"🧹 Dropped {stale_dropped} job(s) older than {MAX_JOB_AGE_DAYS} days")
 
     if alerts:
         print("\n⚠ Health alerts:")
