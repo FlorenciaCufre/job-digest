@@ -94,6 +94,38 @@ US_DESCRIPTION_SIGNALS = [
 USD_SIGNALS = ["usd", "$ ", "us$"]
 GBP_SIGNALS = ["gbp", "£"]
 
+# Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
+# Add to this list as more slip through — lowercase, matched as substring of company name.
+US_COMPANY_BLOCKLIST = [
+    "logicgate",
+    "twilio",
+    "gusto",
+    "rippling",
+    "brex",
+    "deel",
+    "lattice",
+    "retool",
+    "loom",
+    "figma",
+    "mercury",
+    "ramp",
+    "zip recruiter", "ziprecruiter",
+    "samsara",
+    "ocrolus",
+    "thumbtack",
+    "owner.com",
+    "deepgram",
+    "pinterest",
+    "clickup",
+    "happyco",
+    "vercel",
+]
+
+def is_blocked_company(company: str) -> bool:
+    c = company.lower()
+    return any(blocked in c for blocked in US_COMPANY_BLOCKLIST)
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -787,7 +819,7 @@ WATCHLIST = [
     {"name": "PostHog",        "url": "https://posthog.com/careers",                          "ats": "html",       "tier": 2},
     {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",              "ats": "greenhouse", "tier": 2},
     # Tier 3 — speculative / small teams / rare openings
-    {"name": "Rows",           "url": "https://rows.com/about/jobs",                          "ats": "html",       "tier": 3},
+    # Rows removed — careers page URL returned 404 on two attempts; Tier 3 speculative, not worth daily errors
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                      "ats": "html",       "tier": 3},
     {"name": "Readdle",        "url": "https://readdle.com/careers",                          "ats": "html",       "tier": 3},
     {"name": "Pitch",          "url": "https://pitch.com/jobs",                               "ats": "html",       "tier": 3},
