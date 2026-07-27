@@ -373,20 +373,11 @@ def scrape_4dayweek() -> list[dict]:
                 if not title_matches_any(title):
                     continue
 
-                # ── DEBUG ─────────────────────────────────────────────────────
-                remote_allowed = j.get("remote_allowed", [])
-                sal_cur  = j.get("salary_currency", "") or ""
-                sal_min  = j.get("salary_min")
-                sal_max  = j.get("salary_max")
-                desc_raw = (j.get("description", "") or "")[:300]
-                print(
-                    f"  [4DW DEBUG] {company_name!r:20} | "
-                    f"remote_allowed={[l.get('country') for l in remote_allowed]} | "
-                    f"currency={sal_cur!r} salary={sal_min}-{sal_max} | "
-                    f"desc_snippet={desc_raw[:120]!r}"
-                )
-                # ── END DEBUG ─────────────────────────────────────────────────
 
+                if is_blocked_company(company_name):
+                    continue
+
+                remote_allowed = j.get("remote_allowed", [])
                 if remote_allowed:
                     countries = [loc.get("country", "").lower() for loc in remote_allowed]
                     non_eu = [c for c in countries if c not in (
@@ -394,28 +385,24 @@ def scrape_4dayweek() -> list[dict]:
                         "united kingdom", "uk",
                     )]
                     if countries and not non_eu:
-                        print(f"    → DROPPED by remote_allowed (US/UK/CA only): {countries}")
                         continue
                     country_display = [loc.get("country", "") for loc in remote_allowed]
                     location = "Remote – " + ", ".join(c for c in country_display if c) if country_display else "Remote"
                 else:
+                    # No country data — use salary currency as a proxy.
+                    # USD + no location = almost certainly a US-only role on 4DayWeek.
+                    # If currency is also missing, check description then let it through.
+                    cur_raw = (j.get("salary_currency", "") or "").upper().strip()
+                    if cur_raw == "USD":
+                        continue
                     location = "Remote"
-                    print(f"    → remote_allowed EMPTY — defaulting to 'Remote' (gap)")
 
                 if not location_ok(location):
-                    print(f"    → DROPPED by location_ok: {location!r}")
                     continue
 
                 description = j.get("description", "") or ""
                 if is_us_description(description):
-                    print(f"    → DROPPED by is_us_description")
                     continue
-
-                if is_blocked_company(company_name):
-                    print(f"    → DROPPED by company blocklist: {company_name!r}")
-                    continue
-
-                print(f"    → PASSED all filters ✓")
 
                 sal_min = j.get("salary_min")
                 sal_max = j.get("salary_max")
@@ -781,7 +768,7 @@ def scrape_remoteineurope() -> list[dict]:
 WATCHLIST = [
     # Tier 1 — pursue actively
     {"name": "Hostaway",       "url": "https://careers.hostaway.com",                         "ats": "html",       "tier": 1},
-    {"name": "Pennylane",      "url": "https://jobs.lever.co/pennylane",                      "ats": "lever",      "tier": 1},
+    {"name": "Pennylane",      "url": "https://jobs.ashbyhq.com/pennylane",                   "ats": "ashby",      "tier": 1},
     {"name": "Dovetail",       "url": "https://dovetail.com/careers/",                        "ats": "html",       "tier": 1},
     {"name": "Too Good To Go", "url": "https://job-boards.greenhouse.io/toogoodtogo",         "ats": "greenhouse", "tier": 1},
     {"name": "Doctolib",       "url": "https://careers.doctolib.com",                         "ats": "html",       "tier": 1},
@@ -800,7 +787,7 @@ WATCHLIST = [
     {"name": "PostHog",        "url": "https://posthog.com/careers",                          "ats": "html",       "tier": 2},
     {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",              "ats": "greenhouse", "tier": 2},
     # Tier 3 — speculative / small teams / rare openings
-    {"name": "Rows",           "url": "https://rows.com/careers",                             "ats": "html",       "tier": 3},
+    {"name": "Rows",           "url": "https://rows.com/about/jobs",                          "ats": "html",       "tier": 3},
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                      "ats": "html",       "tier": 3},
     {"name": "Readdle",        "url": "https://readdle.com/careers",                          "ats": "html",       "tier": 3},
     {"name": "Pitch",          "url": "https://pitch.com/jobs",                               "ats": "html",       "tier": 3},
