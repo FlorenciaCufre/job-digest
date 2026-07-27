@@ -3,18 +3,16 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (5 APIs + 13 HTML scrapers + watchlist):
-  APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow, RemoteOK
+Sources (4 APIs + 9 HTML scrapers + watchlist):
+  APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
   Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
             TrulyRemote, UXJobs, DynamiteJobs,
-            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope,
-            Dribbble, Jobspresso, Careervault, Remote100K
-  Watchlist: 30 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
+            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope
+  Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
 Email footer includes manual check links:
   LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
-  Flexa, WeLoveProduct, DesignJobs.World,
-  RemotifyEurope, Jobgether, Remote.co, JustRemote
+  Flexa, WeLoveProduct, DesignJobs.World
 """
 
 import os
@@ -40,9 +38,9 @@ REPOST_DAYS     = 14    # resurface a seen job if reposted after this many days
 PRUNE_DAYS      = 30    # remove seen_jobs entries not seen for this many days
 SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
 SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
-MAX_JOB_AGE_DAYS = 21    # hard-drop jobs older than this — safety net for
-                          # sources with unreliable date parsing
+ERROR_ALERT_DAYS = 3    # consecutive fetch errors before health alert fires
 
+# Primary roles — shown in main section
 TITLE_KEYWORDS = [
     "lead product designer",
     "senior product designer",
@@ -77,7 +75,7 @@ EXCLUDE_LOCATION = [
     "united states", " usa",
     # Canada
     "canada only",
-    # UK — added
+    # UK
     "uk only", "united kingdom only",
     "remote · united kingdom", "remote - united kingdom", "remote, united kingdom",
     "remote · uk", "remote - uk", "remote, uk",
@@ -85,15 +83,52 @@ EXCLUDE_LOCATION = [
 ]
 
 US_DESCRIPTION_SIGNALS = [
+    # Benefits (US-specific enough to be reliable signals)
     "401(k)", "401k",
+    "health, dental, and vision",
+    "medical, dental, and vision",
+    "medical, dental & vision",
+    "health, dental & vision",
+    "employee stock purchase plan", "espp",
+    # Hiring eligibility
     "must be authorized to work in the us",
     "must be authorized to work in the united states",
     "us work authorization",
     "authorized to work in the us",
     "eligible to work in the us",
+    "must be based in the us",
+    "must reside in the us",
+    "must be located in the us",
+    "candidates must be in the united states",
+    # Compensation signals
+    "base salary range: $", "base pay: $",
+    "salary range: $",
+    "ote: $",
 ]
 
 USD_SIGNALS = ["usd", "$ ", "us$"]
+
+# Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
+# Add to this list as more slip through — lowercase, matched as substring of company name.
+US_COMPANY_BLOCKLIST = [
+    "logicgate",
+    "twilio",
+    "gusto",
+    "rippling",
+    "brex",
+    "deel",       # Deel is global but most design roles require US timezone
+    "lattice",
+    "retool",
+    "loom",
+    "figma",      # US-headquartered, design roles typically require US
+    "mercury",
+    "ramp",
+    "zip recruiter", "ziprecruiter",
+]
+
+def is_blocked_company(company: str) -> bool:
+    c = company.lower()
+    return any(blocked in c for blocked in US_COMPANY_BLOCKLIST)
 GBP_SIGNALS = ["gbp", "£"]
 
 HEADERS = {
@@ -155,7 +190,6 @@ def title_is_stretch(title: str) -> bool:
     return (not title_matches(title)) and any(kw in t for kw in STRETCH_TITLE_KEYWORDS)
 
 def title_matches_any(title: str) -> bool:
-    """Matches either primary or stretch keywords."""
     return title_matches(title) or title_is_stretch(title)
 
 def location_ok(location: str) -> bool:
@@ -197,7 +231,6 @@ def sanitise_salary(salary: str) -> str:
     """Return empty string if salary looks like a display bug (> SALARY_MAX)."""
     if not salary:
         return ""
-    # Extract the largest number in the string
     nums = re.findall(r"[\d,]+", salary.replace(",", ""))
     for n in nums:
         try:
@@ -252,17 +285,7 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
                 break
         if not matched:
             try:
-                parsed = dateparser.parse(posted_at, dayfirst=False)
-                candidate = parsed.date()
-                # Guard: if treating it as a future date, the month/day are
-                # probably swapped (common with ambiguous "03/06" style strings
-                # from non-US sources) — retry with dayfirst=True.
-                if candidate > today:
-                    parsed_alt = dateparser.parse(posted_at, dayfirst=True)
-                    candidate_alt = parsed_alt.date()
-                    if candidate_alt <= today:
-                        candidate = candidate_alt
-                date = candidate
+                date = dateparser.parse(posted_at).date()
             except Exception:
                 pass
 
@@ -270,13 +293,6 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
         return "Date unknown", None
 
     delta = (TODAY - date).days
-
-    # Safety net: never show a negative age. If the date still resolves to
-    # the future after the dayfirst retry above, something about the source's
-    # format wasn't recognised — treat as unknown rather than display garbage.
-    if delta < 0:
-        return "Date unknown", None
-
     if delta == 0:
         label = "Today"
     elif delta == 1:
@@ -312,7 +328,6 @@ def fetch(url: str, timeout: int = 15, retries: int = 1) -> BeautifulSoup | None
             return BeautifulSoup(r.text, "html.parser")
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
-            # Retry on 429 (rate limit) or 5xx (server error)
             if attempt < retries and status in (429, 500, 502, 503, 504):
                 print(f"  ↻ Retry {attempt + 1} for {url} (status {status})")
                 time.sleep(5)
@@ -341,6 +356,8 @@ def scrape_remotive() -> list[dict]:
         for j in r.json().get("jobs", []):
             title = j.get("title", "")
             if not title_matches_any(title):
+                continue
+            if is_blocked_company(j.get("company_name", "")):
                 continue
             location = j.get("candidate_required_location", "")
             if not location_ok(location):
@@ -392,6 +409,10 @@ def scrape_4dayweek() -> list[dict]:
             for j in items:
                 title = j.get("title", "") or j.get("role", "")
                 if not title_matches_any(title):
+                    continue
+
+                company_name = j.get("company", {}).get("name", "") if isinstance(j.get("company"), dict) else ""
+                if is_blocked_company(company_name):
                     continue
 
                 remote_allowed = j.get("remote_allowed", [])
@@ -584,10 +605,18 @@ def scrape_weworkremotely() -> list[dict]:
         company, title = company.strip(), title.strip()
         if not title_matches_any(title):
             continue
+        if is_blocked_company(company):
+            continue
         region_tag = item.find("region")
         location = region_tag.text.strip() if region_tag else "Remote"
         if not location_ok(location):
             continue
+        # Check description for US-specific hiring signals
+        desc_tag = item.find("description")
+        if desc_tag:
+            description = desc_tag.get_text(separator=" ").lower()
+            if is_us_description(description):
+                continue
         pub_date = item.find("pubdate") or item.find("pubDate")
         age_label, age_date = parse_age(pub_date.text.strip() if pub_date else None)
         link_tag = item.find("link")
@@ -688,7 +717,6 @@ def scrape_nodesk() -> list[dict]:
         date_sel="time, [class*='date']",
     )
 
-
 def scrape_trulyremote() -> list[dict]:
     return _html_scraper(
         url="https://trulyremote.co/?search=senior+product+designer",
@@ -772,161 +800,38 @@ def scrape_remoteineurope() -> list[dict]:
     )
 
 
-def scrape_remoteok() -> list[dict]:
-    """RemoteOK public JSON API — no auth required."""
-    jobs = []
-    try:
-        r = requests.get(
-            "https://remoteok.com/api",
-            params={"tag": "design"},
-            headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        # First item is a legal notice dict, not a job — skip it
-        for j in data:
-            if not isinstance(j, dict) or "position" not in j:
-                continue
-            title = j.get("position", "")
-            if not title_matches_any(title):
-                continue
-            location = j.get("location", "") or "Remote"
-            if not location_ok(location):
-                continue
-            description = j.get("description", "") or ""
-            if is_us_description(description):
-                continue
-            sal_min = j.get("salary_min")
-            sal_max = j.get("salary_max")
-            if sal_min and sal_max:
-                salary = f"USD {int(sal_min):,} – {int(sal_max):,}"
-            elif sal_min:
-                salary = f"USD {int(sal_min):,}+"
-            else:
-                salary = ""
-            salary = sanitise_salary(salary)
-            # epoch timestamp
-            age_label, age_date = parse_age(j.get("epoch") or j.get("date"))
-            url = j.get("url", "") or f"https://remoteok.com/remote-jobs/{j.get('id', '')}"
-            jobs.append({
-                "title":         title,
-                "company":       j.get("company", ""),
-                "location":      location,
-                "salary":        salary,
-                "url":           url,
-                "source":        "RemoteOK",
-                "four_day":      False,
-                "spain_flag":    is_spain_only(location),
-                "currency_flag": currency_flag(salary),
-                "age_label":     age_label,
-                "age_date":      age_date,
-                "is_stretch":    title_is_stretch(title),
-            })
-    except Exception as e:
-        print(f"  ⚠ RemoteOK error: {e}")
-    return jobs
-
-
-def scrape_dribbble() -> list[dict]:
-    """Dribbble Jobs — design-forward companies, curated listings."""
-    return _html_scraper(
-        url="https://dribbble.com/jobs?location=anywhere&remote=true&title=product+designer",
-        source="Dribbble",
-        card_sel="li.job, [class*='job-listing'], [class*='JobListing'], .js-job",
-        title_sel="h2, h3, [class*='job-title'], [class*='JobTitle']",
-        company_sel="[class*='company'], [class*='Company'], [class*='employer']",
-        location_sel="[class*='location'], [class*='Location']",
-        link_sel="a[href]",
-        base_url="https://dribbble.com",
-        default_location="Remote",
-        date_sel="time, [class*='date'], [class*='Date']",
-    )
-
-
-def scrape_jobspresso() -> list[dict]:
-    """Jobspresso — small but curated remote board."""
-    return _html_scraper(
-        url="https://jobspresso.co/remote-jobs/?s=product+designer",
-        source="Jobspresso",
-        card_sel="[class*='job'], article, li[class*='job']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
-
-def scrape_careervault() -> list[dict]:
-    """Careervault — remote-focused, clean listings."""
-    return _html_scraper(
-        url="https://careervault.io/?search=product+designer",
-        source="Careervault",
-        card_sel="[class*='job'], article, [class*='listing'], [class*='card']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
-
-def scrape_remote100k() -> list[dict]:
-    """Remote100K — $100K+ filter acts as a seniority signal."""
-    return _html_scraper(
-        url="https://remote100k.com/?search=product+designer",
-        source="Remote100K",
-        card_sel="[class*='job'], article, [class*='listing'], [class*='card']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
-
 # ── Watchlist scrapers ────────────────────────────────────────────────────────
+#
+# Pre-vetted companies monitored directly. All confirmed remote-EU or
+# Spain-friendly. Location filter relaxed (defaults to "Remote / EU").
 
 WATCHLIST = [
     # Tier 1 — pursue actively
-    {"name": "Hostaway",       "url": "https://careers.hostaway.com",                        "ats": "html",  "tier": 1},
-    {"name": "Pennylane",      "url": "https://jobs.ashbyhq.com/pennylane",                 "ats": "ashby", "tier": 1},
-    {"name": "Dovetail",       "url": "https://jobs.ashbyhq.com/dovetail",                   "ats": "ashby", "tier": 1},
+    {"name": "Hostaway",       "url": "https://careers.hostaway.com",                         "ats": "html",       "tier": 1},
+    {"name": "Pennylane",      "url": "https://jobs.lever.co/pennylane",                      "ats": "lever",      "tier": 1},
+    {"name": "Dovetail",       "url": "https://dovetail.com/careers/",                        "ats": "html",       "tier": 1},
     {"name": "Too Good To Go", "url": "https://job-boards.greenhouse.io/toogoodtogo",         "ats": "greenhouse", "tier": 1},
-    {"name": "Doctolib",       "url": "https://careers.doctolib.com",                        "ats": "html",  "tier": 1},
-    {"name": "Pleo",           "url": "https://jobs.ashbyhq.com/pleo",                       "ats": "ashby", "tier": 1},
+    {"name": "Doctolib",       "url": "https://careers.doctolib.com",                         "ats": "html",       "tier": 1},
+    {"name": "Pleo",           "url": "https://jobs.ashbyhq.com/pleo",                        "ats": "ashby",      "tier": 1},
     # Tier 2 — monitor, apply when role appears
-    {"name": "Productboard",   "url": "https://www.productboard.com/careers/open-positions/","ats": "html",  "tier": 2},
-    {"name": "Automattic",     "url": "https://automattic.com/work-with-us/",                "ats": "html",  "tier": 2},
-    {"name": "Synthesia",      "url": "https://jobs.ashbyhq.com/synthesia",                  "ats": "ashby", "tier": 2},
-    {"name": "Qonto",          "url": "https://jobs.lever.co/qonto",                         "ats": "lever", "tier": 2},
-    {"name": "Alan",           "url": "https://jobs.ashbyhq.com/alan",                       "ats": "ashby", "tier": 2},
-    {"name": "Attio",          "url": "https://jobs.ashbyhq.com/attio",                      "ats": "ashby", "tier": 2},
-    {"name": "Intercom",       "url": "https://www.intercom.com/careers",                    "ats": "html",  "tier": 2},
-    {"name": "Maze",           "url": "https://jobs.ashbyhq.com/mazedesign",                 "ats": "ashby", "tier": 2},
-    {"name": "TheyDo",         "url": "https://jobs.ashbyhq.com/theydo",                     "ats": "ashby", "tier": 2},
-    {"name": "Contentsquare",  "url": "https://jobs.lever.co/contentsquare",                 "ats": "lever", "tier": 2},
-    {"name": "PostHog",        "url": "https://jobs.ashbyhq.com/posthog",                    "ats": "ashby", "tier": 2},
-    {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",             "ats": "greenhouse", "tier": 2},
-    # Tier 1 — travel / hospitality / B2B SaaS, matching CV positioning
-    {"name": "Hopper",         "url": "https://jobs.ashbyhq.com/hopper",                     "ats": "ashby", "tier": 1},
-    {"name": "OLX",            "url": "https://jobs.eu.lever.co/olx",                        "ats": "lever", "tier": 1},
-    {"name": "Vanta",          "url": "https://jobs.ashbyhq.com/vanta",                      "ats": "ashby", "tier": 1},
-    {"name": "n8n",            "url": "https://jobs.ashbyhq.com/n8n",                        "ats": "ashby", "tier": 1},
-    # Tier 2 — design-led B2B SaaS, monitor for senior openings
-    {"name": "Notion",         "url": "https://jobs.ashbyhq.com/notion",                     "ats": "ashby", "tier": 2},
-    {"name": "Linear",         "url": "https://jobs.ashbyhq.com/Linear",                     "ats": "ashby", "tier": 2},
-    {"name": "Superhuman",     "url": "https://jobs.ashbyhq.com/superhuman",                 "ats": "ashby", "tier": 2},
+    {"name": "Productboard",   "url": "https://www.productboard.com/careers/open-positions/", "ats": "html",       "tier": 2},
+    {"name": "Automattic",     "url": "https://automattic.com/work-with-us/",                 "ats": "html",       "tier": 2},
+    {"name": "Synthesia",      "url": "https://www.synthesia.io/careers",                     "ats": "html",       "tier": 2},
+    {"name": "Qonto",          "url": "https://jobs.lever.co/qonto",                          "ats": "lever",      "tier": 2},
+    {"name": "Alan",           "url": "https://jobs.alan.com",                                "ats": "html",       "tier": 2},
+    {"name": "Attio",          "url": "https://jobs.ashbyhq.com/attio",                       "ats": "ashby",      "tier": 2},
+    {"name": "Intercom",       "url": "https://www.intercom.com/careers",                     "ats": "html",       "tier": 2},
+    {"name": "Maze",           "url": "https://maze.co/careers/",                             "ats": "html",       "tier": 2},
+    {"name": "TheyDo",         "url": "https://www.theydo.com/careers",                       "ats": "html",       "tier": 2},
+    {"name": "Hotjar",         "url": "https://www.hotjar.com/careers/",                      "ats": "html",       "tier": 2},
+    {"name": "PostHog",        "url": "https://posthog.com/careers",                          "ats": "html",       "tier": 2},
+    {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",              "ats": "greenhouse", "tier": 2},
     # Tier 3 — speculative / small teams / rare openings
-    {"name": "Rows",           "url": "https://rows.com/careers",                            "ats": "html",  "tier": 3},
-    {"name": "Raycast",        "url": "https://www.raycast.com/careers",                     "ats": "html",  "tier": 3},
-    {"name": "Readdle",        "url": "https://readdle.com/careers",                         "ats": "html",  "tier": 3},
-    {"name": "Pitch",          "url": "https://pitch.com/jobs",                              "ats": "html",  "tier": 3},
-    {"name": "Granola",        "url": "https://www.granola.ai/jobs",                         "ats": "html",  "tier": 3},
+    {"name": "Rows",           "url": "https://rows.com/careers",                             "ats": "html",       "tier": 3},
+    {"name": "Raycast",        "url": "https://www.raycast.com/careers",                      "ats": "html",       "tier": 3},
+    {"name": "Readdle",        "url": "https://readdle.com/careers",                          "ats": "html",       "tier": 3},
+    {"name": "Pitch",          "url": "https://pitch.com/jobs",                               "ats": "html",       "tier": 3},
+    {"name": "Granola",        "url": "https://www.granola.ai/jobs",                          "ats": "html",       "tier": 3},
 ]
 
 WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
@@ -934,8 +839,8 @@ WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
 
 def _watchlist_job(title, company, url, location, salary, tier) -> dict:
     loc = location or "Remote / EU"
-    age_label, age_date = parse_age(None)
     salary = sanitise_salary(salary or "")
+    age_label, age_date = parse_age(None)
     return {
         "title":          title,
         "company":        company,
@@ -1007,7 +912,6 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
 
 
 def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) -> list[dict]:
-    """Greenhouse job board API — more reliable than scraping the HTML page."""
     slug = base_url.rstrip("/").split("/")[-1]
     try:
         r = requests.get(
@@ -1094,16 +998,8 @@ SCRAPERS = [
     ("RemoteRebellion",  scrape_remoterebellion),
     ("UIUXDesignerJobs", scrape_uiuxdesignerjobs),
     ("RemoteInEurope",   scrape_remoteineurope),
-    ("RemoteOK",         scrape_remoteok),
-    ("Dribbble",         scrape_dribbble),
-    ("Jobspresso",       scrape_jobspresso),
-    ("Careervault",      scrape_careervault),
-    ("Remote100K",       scrape_remote100k),
     ("Watchlist",        scrape_watchlist),
 ]
-
-# Days of consecutive fetch errors before a health alert fires
-ERROR_ALERT_DAYS = 3
 
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
@@ -1134,25 +1030,6 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
         time.sleep(1)
 
     return all_jobs, health, alerts
-
-
-def filter_stale_jobs(jobs: list[dict]) -> tuple[list[dict], int]:
-    """Drop jobs older than MAX_JOB_AGE_DAYS. Safety net for sources whose
-    date parsing is unreliable — old listings shouldn't reach the digest
-    regardless of why the date came out wrong. Jobs with no age_date
-    (e.g. watchlist entries, which aren't date-stamped) pass through."""
-    kept = []
-    dropped = 0
-    for j in jobs:
-        age_date = j.get("age_date")
-        if age_date is None:
-            kept.append(j)
-            continue
-        if (TODAY - age_date).days > MAX_JOB_AGE_DAYS:
-            dropped += 1
-            continue
-        kept.append(j)
-    return kept, dropped
 
 
 # ── Deduplication + repost detection ─────────────────────────────────────────
@@ -1250,10 +1127,10 @@ def build_email(
     today_str = TODAY.strftime("%A, %d %B %Y")
 
     # Split primary vs stretch
-    new_primary  = [j for j in new_jobs    if not j.get("is_stretch")]
-    new_stretch  = [j for j in new_jobs    if j.get("is_stretch")]
-    rep_primary  = [j for j in repost_jobs if not j.get("is_stretch")]
-    rep_stretch  = [j for j in repost_jobs if j.get("is_stretch")]
+    new_primary = [j for j in new_jobs    if not j.get("is_stretch")]
+    new_stretch = [j for j in new_jobs    if j.get("is_stretch")]
+    rep_primary = [j for j in repost_jobs if not j.get("is_stretch")]
+    rep_stretch = [j for j in repost_jobs if j.get("is_stretch")]
 
     four_day_count = sum(1 for j in new_jobs + repost_jobs if j.get("four_day"))
     spain_count    = sum(1 for j in new_jobs + repost_jobs if j.get("spain_flag"))
@@ -1330,12 +1207,12 @@ def build_email(
         return html
 
     new_section     = source_section(new_primary)
+    repost_section  = source_section(rep_primary, label="Reposted roles", is_repost=True)
     stretch_section = source_section(
         new_stretch + rep_stretch,
         label="🔭 Stretch roles — worth checking at smaller companies",
         is_stretch_section=True,
     )
-    repost_section  = source_section(rep_primary, label="Reposted roles", is_repost=True)
 
     silence_note = ""
     if is_silence_breaker:
@@ -1347,7 +1224,7 @@ def build_email(
           </p>
         </td></tr>"""
 
-    source_count = len(SCRAPERS) - 1  # exclude Watchlist from source count
+    source_count    = len(SCRAPERS) - 1  # exclude Watchlist
     watchlist_count = len(WATCHLIST)
 
     return f"""<!DOCTYPE html>
@@ -1453,36 +1330,6 @@ def build_email(
             </a>
           </td>
         </tr>
-        <tr>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://remotifyeurope.com"
-               style="display:inline-block;padding:5px 12px;background:#0369a1;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              RemotifyEurope
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://jobgether.com/"
-               style="display:inline-block;padding:5px 12px;background:#7c2d12;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Jobgether
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://remote.co/remote-jobs/design/"
-               style="display:inline-block;padding:5px 12px;background:#15803d;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Remote.co
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://justremote.co/remote-design-jobs"
-               style="display:inline-block;padding:5px 12px;background:#9a3412;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              JustRemote
-            </a>
-          </td>
-        </tr>
       </table>
     </td></tr>
 
@@ -1547,10 +1394,6 @@ def main():
     all_jobs, health, alerts = collect_all_jobs(health)
     save_health(health)
 
-    all_jobs, stale_dropped = filter_stale_jobs(all_jobs)
-    if stale_dropped:
-        print(f"🧹 Dropped {stale_dropped} job(s) older than {MAX_JOB_AGE_DAYS} days")
-
     if alerts:
         print("\n⚠ Health alerts:")
         for a in alerts:
@@ -1560,8 +1403,8 @@ def main():
     new_jobs, repost_jobs, seen = process_jobs(all_jobs, seen)
     save_seen(seen)
 
-    new_primary = [j for j in new_jobs    if not j.get("is_stretch")]
-    new_stretch = [j for j in new_jobs    if j.get("is_stretch")]
+    new_primary = [j for j in new_jobs if not j.get("is_stretch")]
+    new_stretch = [j for j in new_jobs if j.get("is_stretch")]
     print(f"New: {len(new_primary)} primary · {len(new_stretch)} stretch · Reposted: {len(repost_jobs)}")
 
     today_str = TODAY.strftime("%d %b %Y")
