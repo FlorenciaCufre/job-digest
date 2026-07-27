@@ -83,52 +83,15 @@ EXCLUDE_LOCATION = [
 ]
 
 US_DESCRIPTION_SIGNALS = [
-    # Benefits (US-specific enough to be reliable signals)
     "401(k)", "401k",
-    "health, dental, and vision",
-    "medical, dental, and vision",
-    "medical, dental & vision",
-    "health, dental & vision",
-    "employee stock purchase plan", "espp",
-    # Hiring eligibility
     "must be authorized to work in the us",
     "must be authorized to work in the united states",
     "us work authorization",
     "authorized to work in the us",
     "eligible to work in the us",
-    "must be based in the us",
-    "must reside in the us",
-    "must be located in the us",
-    "candidates must be in the united states",
-    # Compensation signals
-    "base salary range: $", "base pay: $",
-    "salary range: $",
-    "ote: $",
 ]
 
 USD_SIGNALS = ["usd", "$ ", "us$"]
-
-# Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
-# Add to this list as more slip through — lowercase, matched as substring of company name.
-US_COMPANY_BLOCKLIST = [
-    "logicgate",
-    "twilio",
-    "gusto",
-    "rippling",
-    "brex",
-    "deel",       # Deel is global but most design roles require US timezone
-    "lattice",
-    "retool",
-    "loom",
-    "figma",      # US-headquartered, design roles typically require US
-    "mercury",
-    "ramp",
-    "zip recruiter", "ziprecruiter",
-]
-
-def is_blocked_company(company: str) -> bool:
-    c = company.lower()
-    return any(blocked in c for blocked in US_COMPANY_BLOCKLIST)
 GBP_SIGNALS = ["gbp", "£"]
 
 HEADERS = {
@@ -357,8 +320,6 @@ def scrape_remotive() -> list[dict]:
             title = j.get("title", "")
             if not title_matches_any(title):
                 continue
-            if is_blocked_company(j.get("company_name", "")):
-                continue
             location = j.get("candidate_required_location", "")
             if not location_ok(location):
                 continue
@@ -408,14 +369,24 @@ def scrape_4dayweek() -> list[dict]:
                 break
             for j in items:
                 title = j.get("title", "") or j.get("role", "")
+                company_name = j.get("company", {}).get("name", "") if isinstance(j.get("company"), dict) else ""
                 if not title_matches_any(title):
                     continue
 
-                company_name = j.get("company", {}).get("name", "") if isinstance(j.get("company"), dict) else ""
-                if is_blocked_company(company_name):
-                    continue
-
+                # ── DEBUG ─────────────────────────────────────────────────────
                 remote_allowed = j.get("remote_allowed", [])
+                sal_cur  = j.get("salary_currency", "") or ""
+                sal_min  = j.get("salary_min")
+                sal_max  = j.get("salary_max")
+                desc_raw = (j.get("description", "") or "")[:300]
+                print(
+                    f"  [4DW DEBUG] {company_name!r:20} | "
+                    f"remote_allowed={[l.get('country') for l in remote_allowed]} | "
+                    f"currency={sal_cur!r} salary={sal_min}-{sal_max} | "
+                    f"desc_snippet={desc_raw[:120]!r}"
+                )
+                # ── END DEBUG ─────────────────────────────────────────────────
+
                 if remote_allowed:
                     countries = [loc.get("country", "").lower() for loc in remote_allowed]
                     non_eu = [c for c in countries if c not in (
@@ -423,18 +394,28 @@ def scrape_4dayweek() -> list[dict]:
                         "united kingdom", "uk",
                     )]
                     if countries and not non_eu:
+                        print(f"    → DROPPED by remote_allowed (US/UK/CA only): {countries}")
                         continue
                     country_display = [loc.get("country", "") for loc in remote_allowed]
                     location = "Remote – " + ", ".join(c for c in country_display if c) if country_display else "Remote"
                 else:
                     location = "Remote"
+                    print(f"    → remote_allowed EMPTY — defaulting to 'Remote' (gap)")
 
                 if not location_ok(location):
+                    print(f"    → DROPPED by location_ok: {location!r}")
                     continue
 
                 description = j.get("description", "") or ""
                 if is_us_description(description):
+                    print(f"    → DROPPED by is_us_description")
                     continue
+
+                if is_blocked_company(company_name):
+                    print(f"    → DROPPED by company blocklist: {company_name!r}")
+                    continue
+
+                print(f"    → PASSED all filters ✓")
 
                 sal_min = j.get("salary_min")
                 sal_max = j.get("salary_max")
@@ -605,18 +586,10 @@ def scrape_weworkremotely() -> list[dict]:
         company, title = company.strip(), title.strip()
         if not title_matches_any(title):
             continue
-        if is_blocked_company(company):
-            continue
         region_tag = item.find("region")
         location = region_tag.text.strip() if region_tag else "Remote"
         if not location_ok(location):
             continue
-        # Check description for US-specific hiring signals
-        desc_tag = item.find("description")
-        if desc_tag:
-            description = desc_tag.get_text(separator=" ").lower()
-            if is_us_description(description):
-                continue
         pub_date = item.find("pubdate") or item.find("pubDate")
         age_label, age_date = parse_age(pub_date.text.strip() if pub_date else None)
         link_tag = item.find("link")
