@@ -38,6 +38,7 @@ REPOST_DAYS     = 14    # resurface a seen job if reposted after this many days
 PRUNE_DAYS      = 30    # remove seen_jobs entries not seen for this many days
 SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
 SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
+MAX_JOB_AGE_DAYS = 21   # hard-drop jobs older than this — safety net for date parsing failures
 ERROR_ALERT_DAYS = 3    # consecutive fetch errors before health alert fires
 
 # Primary roles — shown in main section
@@ -45,7 +46,6 @@ TITLE_KEYWORDS = [
     "lead product designer",
     "senior product designer",
     "lead designer",
-    "head of product design",
 ]
 
 # Stretch roles — shown in a separate section, lower priority
@@ -54,6 +54,15 @@ STRETCH_TITLE_KEYWORDS = [
     "staff product designer",
     "principal designer",
     "staff designer",
+    "head of product design",
+]
+
+# Leadership/C-level — excluded entirely, never shown
+EXCLUDE_TITLE_KEYWORDS = [
+    "vp ", "vp,", "vice president",
+    "director of design", "design director",
+    "chief design officer", "cdo",
+    "head of design",
 ]
 
 LOCATION_KEYWORDS = [
@@ -75,6 +84,11 @@ EXCLUDE_LOCATION = [
     "united states", " usa",
     # Canada
     "canada only",
+    "remote · canada", "remote - canada", "remote, canada",
+    # North America
+    "north america only", "na only",
+    "remote · north america", "remote - north america", "remote, north america",
+    "north america",
     # UK
     "uk only", "united kingdom only",
     "remote · united kingdom", "remote - united kingdom", "remote, united kingdom",
@@ -83,12 +97,27 @@ EXCLUDE_LOCATION = [
 ]
 
 US_DESCRIPTION_SIGNALS = [
+    # Benefits
     "401(k)", "401k",
+    "health, dental, and vision",
+    "medical, dental, and vision",
+    "medical, dental & vision",
+    "health, dental & vision",
+    "employee stock purchase plan", "espp",
+    # Hiring eligibility
     "must be authorized to work in the us",
     "must be authorized to work in the united states",
     "us work authorization",
     "authorized to work in the us",
     "eligible to work in the us",
+    "must be based in the us",
+    "must reside in the us",
+    "must be located in the us",
+    "candidates must be in the united states",
+    # Compensation signals
+    "base salary range: $", "base pay: $",
+    "salary range: $",
+    "ote: $",
 ]
 
 USD_SIGNALS = ["usd", "$ ", "us$"]
@@ -176,11 +205,19 @@ def job_id(title: str, company: str) -> str:
     raw = f"{title.lower().strip()}-{company.lower().strip()}"
     return hashlib.md5(raw.encode()).hexdigest()
 
+def title_is_excluded(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in EXCLUDE_TITLE_KEYWORDS)
+
 def title_matches(title: str) -> bool:
+    if title_is_excluded(title):
+        return False
     t = title.lower()
     return any(kw in t for kw in TITLE_KEYWORDS)
 
 def title_is_stretch(title: str) -> bool:
+    if title_is_excluded(title):
+        return False
     t = title.lower()
     return (not title_matches(title)) and any(kw in t for kw in STRETCH_TITLE_KEYWORDS)
 
@@ -194,7 +231,8 @@ def location_ok(location: str) -> bool:
     if any(ex in loc for ex in EXCLUDE_LOCATION):
         return False
     if loc in ("usa", "united states", "us", "remote usa", "remote us",
-               "uk", "united kingdom", "remote uk"):
+               "uk", "united kingdom", "remote uk",
+               "north america", "canada"):
         return False
     return any(kw in loc for kw in LOCATION_KEYWORDS)
 
@@ -280,7 +318,16 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
                 break
         if not matched:
             try:
-                date = dateparser.parse(posted_at).date()
+                parsed = dateparser.parse(posted_at, dayfirst=False)
+                candidate = parsed.date()
+                # If parsed date is in the future, the format is likely day/month
+                # (EU-style) misread as month/day. Retry with dayfirst=True.
+                if candidate > today:
+                    parsed_alt = dateparser.parse(posted_at, dayfirst=True)
+                    candidate_alt = parsed_alt.date()
+                    if candidate_alt <= today:
+                        candidate = candidate_alt
+                date = candidate
             except Exception:
                 pass
 
@@ -288,6 +335,12 @@ def parse_age(posted_at) -> tuple[str, datetime.date | None]:
         return "Date unknown", None
 
     delta = (TODAY - date).days
+
+    # Never show a negative age — if date is still in the future after retry,
+    # the format wasn't recognised. Show as unknown rather than "-N days ago".
+    if delta < 0:
+        return "Date unknown", None
+
     if delta == 0:
         label = "Today"
     elif delta == 1:
@@ -723,17 +776,126 @@ def scrape_trulyremote() -> list[dict]:
     )
 
 def scrape_uxjobs() -> list[dict]:
-    return _html_scraper(
-        url="https://uxjobs.io/",
-        source="UXJobs",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
+    """jobs.uxjobs.io — remote product designer jobs, aggregated daily.
+    Each listing is a single <a> with the full text inline:
+      '🇩🇪 Remote-Europe Senior Product Designer - Secfix Ashby 8d ago'
+    We use the flag emoji as a location signal before any text parsing.
+    """
+    # Flags that pass (EU + worldwide)
+    EU_FLAGS = {
+        "🌍", "🇦🇹", "🇧🇪", "🇧🇬", "🇭🇷", "🇨🇾", "🇨🇿", "🇩🇰", "🇪🇪",
+        "🇫🇮", "🇫🇷", "🇩🇪", "🇬🇷", "🇭🇺", "🇮🇪", "🇮🇹", "🇱🇻", "🇱🇹",
+        "🇱🇺", "🇲🇹", "🇳🇱", "🇵🇱", "🇵🇹", "🇷🇴", "🇸🇰", "🇸🇮", "🇪🇸",
+        "🇸🇪", "🇨🇭", "🇳🇴", "🇮🇸", "🇷🇸", "🇺🇦", "🇬🇧",  # UK included as
+        # some EU-remote roles post under 🇬🇧; hard exclude catches UK-only text
+    }
+    # Flags that are immediate hard excludes
+    EXCLUDE_FLAGS = {"🇺🇸", "🇨🇦", "🇦🇺", "🇮🇳", "🇧🇷", "🇦🇷",
+                     "🇲🇽", "🇨🇴", "🇵🇪", "🇵🇭", "🇸🇬", "🇰🇷",
+                     "🇨🇳", "🇭🇰", "🇮🇩", "🇻🇳", "🇿🇦", "🇳🇬",
+                     "🇧🇩", "🇧🇿", "🇸🇻", "🇨🇷"}
+
+    jobs = []
+    soup = fetch("https://jobs.uxjobs.io/remote-product-designer-jobs/", source="UXJobs")
+    if not soup:
+        return jobs
+
+    seen_urls = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # Only job links (direct or detail pages)
+        if not ("/jobs/" in href or "ashbyhq.com" in href or "lever.co" in href
+                or "greenhouse.io" in href or "weworkremotely.com" in href):
+            continue
+
+        raw = a.get_text(separator=" ").strip()
+        if not raw or len(raw) < 10:
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+
+        # Extract flag — country flags are 2 regional indicator codepoints
+        chars = list(raw)
+        if (len(chars) >= 2
+                and 0x1F1E0 <= ord(chars[0]) <= 0x1F1FF
+                and 0x1F1E0 <= ord(chars[1]) <= 0x1F1FF):
+            flag = chars[0] + chars[1]
+        elif chars and ord(chars[0]) > 127:
+            flag = chars[0]
+        else:
+            flag = ""
+
+        # Location decision based on flag
+        if flag in EXCLUDE_FLAGS:
+            continue
+        if flag in EU_FLAGS:
+            location = "Europe / Remote"
+        else:
+            # No flag or unknown — fall through to text-based location_ok
+            location = "Remote"
+
+        # Strip flag + location prefix, ATS name suffix, and age suffix from raw text
+        # Pattern: "🇩🇪 Remote-Europe, Remote-Munich TITLE - COMPANY ATS Xd ago"
+        import re as _re
+        # Remove leading flag and location description up to first uppercase word run
+        text = _re.sub(r'^[\U0001F1E0-\U0001F1FF\U0001F300-\U0001FFFF\s]+', '', raw).strip()
+        # Remove trailing age stamp ("12h ago", "3d ago", "1 day ago")
+        text = _re.sub(r'\s+\d+[hd]\s+ago\s*$', '', text).strip()
+        text = _re.sub(r'\s+\d+\s+days?\s+ago\s*$', '', text, flags=_re.I).strip()
+        # Remove trailing ATS source (known values from the site)
+        for ats in ["Ashby", "Greenhouse", "Lever", "Rippling", "Workday",
+                    "JazzHR", "Recruitee", "SmartRecruiters", "BambooHR",
+                    "iCIMS", "Personio", "Teamtailor", "Gem", "Workable",
+                    "Start-Ups & VC", "Direct Corp", "We Work Remotely",
+                    "Recruiters", "Eightfold"]:
+            if text.endswith(ats):
+                text = text[:-len(ats)].strip()
+                break
+
+        # Split "TITLE - COMPANY"
+        if " - " in text:
+            parts = text.rsplit(" - ", 1)
+            title = parts[0].strip()
+            company = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            title = text
+            company = ""
+
+        if not title_matches_any(title):
+            continue
+        if is_blocked_company(company):
+            continue
+        if not location_ok(location):
+            continue
+
+        # Age: not reliably extractable from the text after stripping, mark unknown
+        age_label, age_date = "Date unknown", None
+        # Try to re-extract from the raw string
+        age_match = _re.search(r'(\d+)([hd])\s+ago', raw)
+        if age_match:
+            n, unit = int(age_match.group(1)), age_match.group(2)
+            import datetime
+            delta = datetime.timedelta(hours=n if unit == "h" else n * 24)
+            age_date = (datetime.date.today() - delta)
+            age_label, age_date = parse_age(str(age_date))
+
+        jobs.append({
+            "title":         title,
+            "company":       company,
+            "location":      location,
+            "salary":        "",
+            "url":           href if href.startswith("http") else f"https://jobs.uxjobs.io{href}",
+            "source":        "UXJobs",
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": "",
+            "age_label":     age_label,
+            "age_date":      age_date,
+            "is_stretch":    title_is_stretch(title),
+        })
+
+    return jobs
 
 def scrape_dynamitejobs() -> list[dict]:
     return _html_scraper(
@@ -798,28 +960,35 @@ def scrape_remoteineurope() -> list[dict]:
 # Spain-friendly. Location filter relaxed (defaults to "Remote / EU").
 
 WATCHLIST = [
-    # Tier 1 — pursue actively
+    # ── Tier 1 — primary targets, close domain match ──────────────────────────
     {"name": "Hostaway",       "url": "https://careers.hostaway.com",                         "ats": "html",       "tier": 1},
     {"name": "Pennylane",      "url": "https://jobs.ashbyhq.com/pennylane",                   "ats": "ashby",      "tier": 1},
-    {"name": "Dovetail",       "url": "https://dovetail.com/careers/",                        "ats": "html",       "tier": 1},
+    {"name": "Dovetail",       "url": "https://jobs.ashbyhq.com/dovetail",                    "ats": "ashby",      "tier": 1},
     {"name": "Too Good To Go", "url": "https://job-boards.greenhouse.io/toogoodtogo",         "ats": "greenhouse", "tier": 1},
     {"name": "Doctolib",       "url": "https://careers.doctolib.com",                         "ats": "html",       "tier": 1},
     {"name": "Pleo",           "url": "https://jobs.ashbyhq.com/pleo",                        "ats": "ashby",      "tier": 1},
-    # Tier 2 — monitor, apply when role appears
+    {"name": "Hopper",         "url": "https://jobs.ashbyhq.com/hopper",                      "ats": "ashby",      "tier": 1},
+    {"name": "OLX",            "url": "https://jobs.eu.lever.co/olx",                         "ats": "lever",      "tier": 1},
+    {"name": "Vanta",          "url": "https://jobs.ashbyhq.com/vanta",                       "ats": "ashby",      "tier": 1},
+    {"name": "n8n",            "url": "https://jobs.ashbyhq.com/n8n",                         "ats": "ashby",      "tier": 1},
+    # ── Tier 2 — good fit, monitor for openings ───────────────────────────────
     {"name": "Productboard",   "url": "https://www.productboard.com/careers/open-positions/", "ats": "html",       "tier": 2},
     {"name": "Automattic",     "url": "https://automattic.com/work-with-us/",                 "ats": "html",       "tier": 2},
-    {"name": "Synthesia",      "url": "https://www.synthesia.io/careers",                     "ats": "html",       "tier": 2},
+    {"name": "Synthesia",      "url": "https://jobs.ashbyhq.com/synthesia",                   "ats": "ashby",      "tier": 2},
     {"name": "Qonto",          "url": "https://jobs.lever.co/qonto",                          "ats": "lever",      "tier": 2},
-    {"name": "Alan",           "url": "https://jobs.alan.com",                                "ats": "html",       "tier": 2},
+    {"name": "Alan",           "url": "https://jobs.ashbyhq.com/alan",                        "ats": "ashby",      "tier": 2},
     {"name": "Attio",          "url": "https://jobs.ashbyhq.com/attio",                       "ats": "ashby",      "tier": 2},
     {"name": "Intercom",       "url": "https://www.intercom.com/careers",                     "ats": "html",       "tier": 2},
-    {"name": "Maze",           "url": "https://maze.co/careers/",                             "ats": "html",       "tier": 2},
-    {"name": "TheyDo",         "url": "https://www.theydo.com/careers",                       "ats": "html",       "tier": 2},
-    {"name": "Hotjar",         "url": "https://www.hotjar.com/careers/",                      "ats": "html",       "tier": 2},
-    {"name": "PostHog",        "url": "https://posthog.com/careers",                          "ats": "html",       "tier": 2},
+    {"name": "Maze",           "url": "https://jobs.ashbyhq.com/mazedesign",                  "ats": "ashby",      "tier": 2},
+    {"name": "TheyDo",         "url": "https://jobs.ashbyhq.com/theydo",                      "ats": "ashby",      "tier": 2},
+    {"name": "Contentsquare",  "url": "https://jobs.lever.co/contentsquare",                  "ats": "lever",      "tier": 2},
+    {"name": "PostHog",        "url": "https://jobs.ashbyhq.com/posthog",                     "ats": "ashby",      "tier": 2},
     {"name": "Apaleo",         "url": "https://job-boards.greenhouse.io/apaleo",              "ats": "greenhouse", "tier": 2},
-    # Tier 3 — speculative / small teams / rare openings
-    # Rows removed — careers page URL returned 404 on two attempts; Tier 3 speculative, not worth daily errors
+    {"name": "Notion",         "url": "https://jobs.ashbyhq.com/notion",                      "ats": "ashby",      "tier": 2},
+    {"name": "Linear",         "url": "https://jobs.ashbyhq.com/Linear",                      "ats": "ashby",      "tier": 2},
+    {"name": "Superhuman",     "url": "https://jobs.ashbyhq.com/superhuman",                  "ats": "ashby",      "tier": 2},
+    # ── Tier 3 — speculative / small teams / rare openings ───────────────────
+    # Rows removed — 404 on two URL attempts
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                      "ats": "html",       "tier": 3},
     {"name": "Readdle",        "url": "https://readdle.com/careers",                          "ats": "html",       "tier": 3},
     {"name": "Pitch",          "url": "https://pitch.com/jobs",                               "ats": "html",       "tier": 3},
@@ -1022,6 +1191,24 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
         time.sleep(1)
 
     return all_jobs, health, alerts
+
+
+# ── Staleness filter ─────────────────────────────────────────────────────────
+
+def filter_stale_jobs(jobs: list[dict]) -> tuple[list[dict], int]:
+    """Drop jobs older than MAX_JOB_AGE_DAYS. Safety net for sources with
+    unreliable date parsing. Jobs with no age_date pass through."""
+    kept, dropped = [], 0
+    for j in jobs:
+        age_date = j.get("age_date")
+        if age_date is None:
+            kept.append(j)
+            continue
+        if (TODAY - age_date).days > MAX_JOB_AGE_DAYS:
+            dropped += 1
+        else:
+            kept.append(j)
+    return kept, dropped
 
 
 # ── Deduplication + repost detection ─────────────────────────────────────────
@@ -1385,6 +1572,10 @@ def main():
 
     all_jobs, health, alerts = collect_all_jobs(health)
     save_health(health)
+
+    all_jobs, stale_dropped = filter_stale_jobs(all_jobs)
+    if stale_dropped:
+        print(f"🧹 Dropped {stale_dropped} job(s) older than {MAX_JOB_AGE_DAYS} days")
 
     if alerts:
         print("\n⚠ Health alerts:")
