@@ -796,7 +796,7 @@ def scrape_uxjobs() -> list[dict]:
                      "🇧🇩", "🇧🇿", "🇸🇻", "🇨🇷"}
 
     jobs = []
-    soup = fetch("https://jobs.uxjobs.io/remote-product-designer-jobs/", source="UXJobs")
+    soup = fetch("https://jobs.uxjobs.io/remote-product-designer-jobs/")
     if not soup:
         return jobs
 
