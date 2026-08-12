@@ -135,8 +135,22 @@ NON_EU_HARD_EXCLUDE_COUNTRIES = {
     "colombia", "peru", "philippines", "singapore", "south korea",
     "china", "hong kong", "indonesia", "vietnam", "south africa",
     "nigeria", "bangladesh", "belize", "el salvador", "costa rica",
-    "new zealand", "japan",
+    "new zealand", "japan", "thailand",
 }
+
+
+def location_country_ok(location: str) -> bool:
+    """Hard-exclude check for sources that give a bare 'Remote <Country>'
+    string (e.g. "Remote US", "Remote Thailand"). location_ok() alone would
+    wave these through just because they contain the word "remote" — this
+    strips that prefix and checks the actual place name underneath."""
+    loc = location.lower().strip()
+    bare = re.sub(r'^(remote|worldwide)\s*[-–,]?\s*', '', loc).strip()
+    if not bare:
+        return True
+    aliases = {"namer": "united states", "na": "united states", "usa": "united states"}
+    bare = aliases.get(bare, bare)
+    return bare not in NON_EU_HARD_EXCLUDE_COUNTRIES
 
 # Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
 # Add to this list as more slip through — lowercase, matched as substring of company name.
@@ -547,59 +561,64 @@ def scrape_4dayweek() -> list[dict]:
 
 
 def scrape_himalayas() -> list[dict]:
+    """Himalayas' seniority filter silently returns an empty response for a
+    comma-joined value like "senior,lead" — confirmed by direct testing.
+    It only accepts one value per request, so we run one paginated pass per
+    seniority level instead. Global job_id dedup handles any overlap."""
     jobs = []
-    offset = 0
-    while True:
-        try:
-            r = requests.get(
-                "https://himalayas.app/jobs/api/search",
-                params={
-                    "q":         "product designer",
-                    "seniority": "senior,lead",
-                    "limit":     20,
-                    "offset":    offset,
-                },
-                headers=HEADERS,
-                timeout=15,
-            )
-            data = r.json()
-            items = data if isinstance(data, list) else data.get("jobs", [])
-            if not items:
+    for seniority in ("Senior", "Lead"):
+        offset = 0
+        while True:
+            try:
+                r = requests.get(
+                    "https://himalayas.app/jobs/api/search",
+                    params={
+                        "q":         "product designer",
+                        "seniority": seniority,
+                        "limit":     20,
+                        "offset":    offset,
+                    },
+                    headers=HEADERS,
+                    timeout=15,
+                )
+                data = r.json()
+                items = data if isinstance(data, list) else data.get("jobs", [])
+                if not items:
+                    break
+                for j in items:
+                    title = j.get("title", "")
+                    if not title_matches_any(title):
+                        continue
+                    company_name = j.get("companyName", "")
+                    if is_blocked_company(company_name):
+                        continue
+                    restrictions = j.get("locationRestrictions", []) or []
+                    location = ", ".join(restrictions) if restrictions else "Remote"
+                    if not location_ok(location):
+                        continue
+                    salary = sanitise_salary(_himalayas_salary(j))
+                    age_label, age_date = parse_age(j.get("pubDate"))
+                    jobs.append({
+                        "title":         title,
+                        "company":       company_name,
+                        "location":      location,
+                        "salary":        salary,
+                        "url":           j.get("applicationLink", ""),
+                        "source":        "Himalayas",
+                        "four_day":      False,
+                        "spain_flag":    is_spain_only(location),
+                        "currency_flag": currency_flag(salary),
+                        "age_label":     age_label,
+                        "age_date":      age_date,
+                        "is_stretch":    title_is_stretch(title),
+                    })
+                if len(items) < 20:
+                    break
+                offset += 20
+                time.sleep(1)
+            except Exception as e:
+                print(f"  ⚠ Himalayas error (seniority={seniority}, offset {offset}): {e}")
                 break
-            for j in items:
-                title = j.get("title", "")
-                if not title_matches_any(title):
-                    continue
-                company_name = j.get("companyName", "")
-                if is_blocked_company(company_name):
-                    continue
-                restrictions = j.get("locationRestrictions", []) or []
-                location = ", ".join(restrictions) if restrictions else "Remote"
-                if not location_ok(location):
-                    continue
-                salary = sanitise_salary(_himalayas_salary(j))
-                age_label, age_date = parse_age(j.get("pubDate"))
-                jobs.append({
-                    "title":         title,
-                    "company":       company_name,
-                    "location":      location,
-                    "salary":        salary,
-                    "url":           j.get("applicationLink", ""),
-                    "source":        "Himalayas",
-                    "four_day":      False,
-                    "spain_flag":    is_spain_only(location),
-                    "currency_flag": currency_flag(salary),
-                    "age_label":     age_label,
-                    "age_date":      age_date,
-                    "is_stretch":    title_is_stretch(title),
-                })
-            if len(items) < 20:
-                break
-            offset += 20
-            time.sleep(1)
-        except Exception as e:
-            print(f"  ⚠ Himalayas error (offset {offset}): {e}")
-            break
     return jobs
 
 def _himalayas_salary(j: dict) -> str:
@@ -919,46 +938,120 @@ def scrape_dynamitejobs() -> list[dict]:
     )
 
 def scrape_remoterebellion() -> list[dict]:
-    return _html_scraper(
-        url="https://remoterebellion.com/remote-design-jobs",
-        source="RemoteRebellion",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://remoterebellion.com",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
+    """remoterebellion.com/remote-design-jobs is a Squarespace rich-text
+    block — postings are plain <a>Title (Location)</a> links with no
+    separate company/location markup. Company is inferred from the ATS
+    URL slug (Ashby/Lever/Greenhouse/etc.) since it isn't given as text.
+    """
+    jobs = []
+    soup = fetch("https://remoterebellion.com/remote-design-jobs")
+    if not soup:
+        return jobs
 
-def scrape_uiuxdesignerjobs() -> list[dict]:
-    return _html_scraper(
-        url="https://uiuxdesignerjobs.com/product-designer-jobs-europe/",
-        source="UIUXDesignerJobs",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://uiuxdesignerjobs.com",
-        default_location="Europe / Remote",
-        date_sel="time, [class*='date']",
-    )
+    seen_urls = set()
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(strip=True)
+        m = re.match(r'^(.*)\(([^)]+)\)\s*$', text)
+        if not m:
+            continue
+        title, location = m.group(1).strip(), m.group(2).strip()
+        if not title_matches_any(title):
+            continue
+
+        href = a["href"]
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+
+        slug_match = re.search(
+            r'(?:ashbyhq\.com|jobs\.lever\.co|greenhouse\.io|smartrecruiters\.com|teamtailor\.com|workable\.com)'
+            r'/([a-zA-Z0-9\-\.]+)',
+            href,
+        )
+        company = slug_match.group(1).replace("-", " ").replace(".", " ").title() if slug_match else ""
+
+        if is_blocked_company(company):
+            continue
+        if not location_ok(location) or not location_country_ok(location):
+            continue
+
+        jobs.append({
+            "title":         title,
+            "company":       company,
+            "location":      location,
+            "salary":        "",
+            "url":           href,
+            "source":        "RemoteRebellion",
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": "",
+            "age_label":     "Date unknown",
+            "age_date":      None,
+            "is_stretch":    title_is_stretch(title),
+        })
+
+    return jobs
+
 
 def scrape_remoteineurope() -> list[dict]:
-    return _html_scraper(
-        url="https://remoteineurope.com/",
-        source="RemoteInEurope",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://remoteineurope.com",
-        default_location="Europe / Remote",
-        date_sel="time, [class*='date']",
-    )
+    """remoteineurope.com — each posting is an <a class="card job"> itself
+    (not a wrapper around a link), with clean sub-elements for title,
+    company, and location. The site is EU-scoped by design (its whole
+    premise is "remote jobs in Europe"), so the location tag is often just
+    the continent "Europe" rather than a specific country.
+    """
+    jobs = []
+    seen_urls = set()
+    for category in ("design", "product"):
+        soup = fetch(f"https://remoteineurope.com/categories/{category}")
+        if not soup:
+            continue
+
+        for card in soup.select("a.card.job"):
+            href = card.get("href", "")
+            if href in seen_urls:
+                continue
+
+            title_el = card.select_one("h3.title.card-job, .title.card-job")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            if not title_matches_any(title):
+                continue
+
+            company_el = card.select_one(".job-content .card-link.homepage")
+            company = company_el.get_text(strip=True) if company_el else ""
+            if is_blocked_company(company):
+                continue
+
+            loc_el = card.select_one(".card-short-location-wrapper .short-location")
+            location = loc_el.get_text(strip=True) if loc_el else "Europe"
+            if not location_ok(location) or not location_country_ok(location):
+                continue
+
+            seen_urls.add(href)
+            url_full = href if href.startswith("http") else f"https://remoteineurope.com{href}"
+            date_el = card.select_one(".date-text")
+            raw_date = date_el.get_text(strip=True) if date_el else None
+            age_label, age_date = parse_age(raw_date)
+
+            jobs.append({
+                "title":         title,
+                "company":       company,
+                "location":      location,
+                "salary":        "",
+                "url":           url_full,
+                "source":        "RemoteInEurope",
+                "four_day":      False,
+                "spain_flag":    is_spain_only(location),
+                "currency_flag": "",
+                "age_label":     age_label,
+                "age_date":      age_date,
+                "is_stretch":    title_is_stretch(title),
+            })
+        time.sleep(0.5)
+
+    return jobs
 
 
 # ── Watchlist scrapers ────────────────────────────────────────────────────────
@@ -1158,19 +1251,26 @@ def scrape_watchlist() -> list[dict]:
 
 # ── Collect + health check ────────────────────────────────────────────────────
 
+# Removed from active rotation:
+#   Remotive         — free API gutted by a 2026 paywall change ("0.4% of
+#                       available roles" without a paid account). No code fix
+#                       possible; moved to the manual-check footer.
+#   WorkingNomads,
+#   Nodesk,
+#   TrulyRemote,
+#   DynamiteJobs      — confirmed JS-rendered SPAs. requests+BeautifulSoup only
+#                       ever sees the page shell (filters/nav), never the
+#                       actual job listings, no matter the selectors. Would
+#                       need a headless browser to scrape; moved to manual-check.
+#   UIUXDesignerJobs  — domain appears dead (empty page, no content at all).
+#                       Dropped entirely, not worth a manual-check link.
 SCRAPERS = [
-    ("Remotive",         scrape_remotive),
     ("4DayWeek",         scrape_4dayweek),
     ("Himalayas",        scrape_himalayas),
     ("Arbeitnow",        scrape_arbeitnow),
     ("WeWorkRemotely",   scrape_weworkremotely),
-    ("WorkingNomads",    scrape_workingnomads),
-    ("Nodesk",           scrape_nodesk),
-    ("TrulyRemote",      scrape_trulyremote),
     ("UXJobs",           scrape_uxjobs),
-    ("DynamiteJobs",     scrape_dynamitejobs),
     ("RemoteRebellion",  scrape_remoterebellion),
-    ("UIUXDesignerJobs", scrape_uiuxdesignerjobs),
     ("RemoteInEurope",   scrape_remoteineurope),
     ("Watchlist",        scrape_watchlist),
 ]
@@ -1533,6 +1633,43 @@ def build_email(
                style="display:inline-block;padding:5px 12px;background:#1e293b;color:#fff;
                       font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
               DesignJobs.World
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://remotive.com/remote-jobs/design"
+               style="display:inline-block;padding:5px 12px;background:#f97316;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Remotive
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://www.workingnomads.com/jobs?tag=product-design&location=europe"
+               style="display:inline-block;padding:5px 12px;background:#0891b2;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              WorkingNomads
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://nodesk.co/remote-jobs/design/"
+               style="display:inline-block;padding:5px 12px;background:#4c63b6;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              Nodesk
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://trulyremote.co/design"
+               style="display:inline-block;padding:5px 12px;background:#16003d;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              TrulyRemote
+            </a>
+          </td>
+          <td style="padding:0 8px 8px 0;">
+            <a href="https://dynamitejobs.com/remote-jobs/design/ux-web-design"
+               style="display:inline-block;padding:5px 12px;background:#ea580c;color:#fff;
+                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
+              DynamiteJobs
             </a>
           </td>
         </tr>
