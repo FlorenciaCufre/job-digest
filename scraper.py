@@ -40,6 +40,7 @@ SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
 SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
 MAX_JOB_AGE_DAYS = 21   # hard-drop jobs older than this — safety net for date parsing failures
 ERROR_ALERT_DAYS = 3    # consecutive fetch errors before health alert fires
+ZERO_RESULT_ALERT_DAYS = 5  # consecutive 0-result days (fetch OK, no matches) before health alert fires
 
 # Primary roles — shown in main section
 TITLE_KEYWORDS = [
@@ -122,6 +123,20 @@ US_DESCRIPTION_SIGNALS = [
 
 USD_SIGNALS = ["usd", "$ ", "us$"]
 GBP_SIGNALS = ["gbp", "£"]
+
+# Countries that hard-exclude a job even when other structured signals (e.g. a
+# "Remote" API field) would otherwise let it through. Used where a source gives
+# us real country data (not just free text) — e.g. 4DayWeek's remote_allowed.
+NON_EU_HARD_EXCLUDE_COUNTRIES = {
+    "united states", "usa", "us",
+    "canada",
+    "united kingdom", "uk",
+    "australia", "india", "brazil", "argentina", "mexico",
+    "colombia", "peru", "philippines", "singapore", "south korea",
+    "china", "hong kong", "indonesia", "vietnam", "south africa",
+    "nigeria", "bangladesh", "belize", "el salvador", "costa rica",
+    "new zealand", "japan",
+}
 
 # Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
 # Add to this list as more slip through — lowercase, matched as substring of company name.
@@ -405,6 +420,9 @@ def scrape_remotive() -> list[dict]:
             title = j.get("title", "")
             if not title_matches_any(title):
                 continue
+            company_name = j.get("company_name", "")
+            if is_blocked_company(company_name):
+                continue
             location = j.get("candidate_required_location", "")
             if not location_ok(location):
                 continue
@@ -415,7 +433,7 @@ def scrape_remotive() -> list[dict]:
             age_label, age_date = parse_age(j.get("publication_date") or j.get("posted"))
             jobs.append({
                 "title":         title,
-                "company":       j.get("company_name", ""),
+                "company":       company_name,
                 "location":      location or "Remote",
                 "salary":        salary,
                 "url":           j.get("url", ""),
@@ -464,15 +482,19 @@ def scrape_4dayweek() -> list[dict]:
 
                 remote_allowed = j.get("remote_allowed", [])
                 if remote_allowed:
-                    countries = [loc.get("country", "").lower() for loc in remote_allowed]
-                    non_eu = [c for c in countries if c not in (
-                        "united states", "usa", "us", "canada",
-                        "united kingdom", "uk",
-                    )]
-                    if countries and not non_eu:
+                    countries = [loc.get("country", "").lower().strip() for loc in remote_allowed]
+                    countries = [c for c in countries if c]
+                    # Exclude only if EVERY listed country is a hard-exclude one.
+                    # NOTE: this decision is made directly from the structured
+                    # country list, not routed through location_ok() — the old
+                    # "Remote – " display prefix always contained the word
+                    # "remote", which trivially passed location_ok() no matter
+                    # which countries were actually listed (e.g. "Remote –
+                    # Australia, India" slipped through unfiltered).
+                    if countries and all(c in NON_EU_HARD_EXCLUDE_COUNTRIES for c in countries):
                         continue
                     country_display = [loc.get("country", "") for loc in remote_allowed]
-                    location = "Remote – " + ", ".join(c for c in country_display if c) if country_display else "Remote"
+                    location = ", ".join(c for c in country_display if c) or "Worldwide"
                 else:
                     # No country data — use salary currency as a proxy.
                     # USD + no location = almost certainly a US-only role on 4DayWeek.
@@ -481,9 +503,8 @@ def scrape_4dayweek() -> list[dict]:
                     if cur_raw == "USD":
                         continue
                     location = "Remote"
-
-                if not location_ok(location):
-                    continue
+                    if not location_ok(location):
+                        continue
 
                 description = j.get("description", "") or ""
                 if is_us_description(description):
@@ -549,6 +570,9 @@ def scrape_himalayas() -> list[dict]:
                 title = j.get("title", "")
                 if not title_matches_any(title):
                     continue
+                company_name = j.get("companyName", "")
+                if is_blocked_company(company_name):
+                    continue
                 restrictions = j.get("locationRestrictions", []) or []
                 location = ", ".join(restrictions) if restrictions else "Remote"
                 if not location_ok(location):
@@ -557,7 +581,7 @@ def scrape_himalayas() -> list[dict]:
                 age_label, age_date = parse_age(j.get("pubDate"))
                 jobs.append({
                     "title":         title,
-                    "company":       j.get("companyName", ""),
+                    "company":       company_name,
                     "location":      location,
                     "salary":        salary,
                     "url":           j.get("applicationLink", ""),
@@ -614,6 +638,9 @@ def scrape_arbeitnow() -> list[dict]:
                 title = j.get("title", "")
                 if not title_matches_any(title):
                     continue
+                company_name = j.get("company_name", "")
+                if is_blocked_company(company_name):
+                    continue
                 if not j.get("remote", False):
                     continue
                 location = j.get("location", "") or "Remote"
@@ -622,7 +649,7 @@ def scrape_arbeitnow() -> list[dict]:
                 age_label, age_date = parse_age(j.get("created_at") or j.get("date"))
                 jobs.append({
                     "title":         title,
-                    "company":       j.get("company_name", ""),
+                    "company":       company_name,
                     "location":      location,
                     "salary":        "",
                     "url":           j.get("url", ""),
@@ -657,6 +684,8 @@ def scrape_weworkremotely() -> list[dict]:
         company, title = (raw.split(":", 1) if ":" in raw else ("", raw))
         company, title = company.strip(), title.strip()
         if not title_matches_any(title):
+            continue
+        if is_blocked_company(company):
             continue
         region_tag = item.find("region")
         location = region_tag.text.strip() if region_tag else "Remote"
@@ -710,10 +739,12 @@ def _html_scraper(
         title = title_el.get_text(strip=True)
         if not title_matches_any(title):
             continue
+        company = company_el.get_text(strip=True) if company_el else ""
+        if is_blocked_company(company):
+            continue
         location = location_el.get_text(strip=True) if location_el else default_location
         if not location_ok(location):
             continue
-        company = company_el.get_text(strip=True) if company_el else ""
         href = link_el["href"] if link_el and link_el.has_attr("href") else ""
         url_full = f"{base_url}{href}" if href.startswith("/") else href
         raw_date = date_el.get_text(strip=True) if date_el else None
@@ -777,19 +808,21 @@ def scrape_trulyremote() -> list[dict]:
 
 def scrape_uxjobs() -> list[dict]:
     """jobs.uxjobs.io — remote product designer jobs, aggregated daily.
-    Each listing is a single <a> with the full text inline:
-      '🇩🇪 Remote-Europe Senior Product Designer - Secfix Ashby 8d ago'
-    We use the flag emoji as a location signal before any text parsing.
+    Each listing is an <article class="card"> with clean sub-elements:
+      .card-loc   -> flag emoji + real location text, e.g. "🌍 Anywhere in the World"
+      .card-title -> "Title - Company"
+      .card-time  -> age, e.g. "18h ago" / "3 days ago"
+      .card-link[href] -> the outbound job link
+
+    IMPORTANT: UXJobs uses a generic 🌍 globe icon for ANY multi-region or
+    ambiguous-location posting — it does not mean "EU-safe". Country flags
+    (e.g. 🇺🇸, 🇩🇪) are reliable, but 🌍 covers everything from "Anywhere in
+    the World" to "Multiple locations" to roles that are explicitly US-only
+    in the title. So the flag is only used as a fast hard-exclude pre-check;
+    the real decision always runs the actual location TEXT through the same
+    location_ok() hard-exclude logic every other source uses.
     """
-    # Flags that pass (EU + worldwide)
-    EU_FLAGS = {
-        "🌍", "🇦🇹", "🇧🇪", "🇧🇬", "🇭🇷", "🇨🇾", "🇨🇿", "🇩🇰", "🇪🇪",
-        "🇫🇮", "🇫🇷", "🇩🇪", "🇬🇷", "🇭🇺", "🇮🇪", "🇮🇹", "🇱🇻", "🇱🇹",
-        "🇱🇺", "🇲🇹", "🇳🇱", "🇵🇱", "🇵🇹", "🇷🇴", "🇸🇰", "🇸🇮", "🇪🇸",
-        "🇸🇪", "🇨🇭", "🇳🇴", "🇮🇸", "🇷🇸", "🇺🇦", "🇬🇧",  # UK included as
-        # some EU-remote roles post under 🇬🇧; hard exclude catches UK-only text
-    }
-    # Flags that are immediate hard excludes
+    # Flags that are immediate hard excludes — reliable when present
     EXCLUDE_FLAGS = {"🇺🇸", "🇨🇦", "🇦🇺", "🇮🇳", "🇧🇷", "🇦🇷",
                      "🇲🇽", "🇨🇴", "🇵🇪", "🇵🇭", "🇸🇬", "🇰🇷",
                      "🇨🇳", "🇭🇰", "🇮🇩", "🇻🇳", "🇿🇦", "🇳🇬",
@@ -801,22 +834,21 @@ def scrape_uxjobs() -> list[dict]:
         return jobs
 
     seen_urls = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        # Only job links (direct or detail pages)
-        if not ("/jobs/" in href or "ashbyhq.com" in href or "lever.co" in href
-                or "greenhouse.io" in href or "weworkremotely.com" in href):
+    for card in soup.select("article.card"):
+        link_el = card.select_one("a.card-link[href]") or card.select_one("a[href]")
+        loc_el = card.select_one(".card-loc")
+        title_el = card.select_one(".card-title")
+        if not link_el or not loc_el or not title_el:
             continue
 
-        raw = a.get_text(separator=" ").strip()
-        if not raw or len(raw) < 10:
-            continue
+        href = link_el["href"]
         if href in seen_urls:
             continue
         seen_urls.add(href)
 
-        # Extract flag — country flags are 2 regional indicator codepoints
-        chars = list(raw)
+        # Split flag from the real location text
+        loc_raw = loc_el.get_text(separator=" ", strip=True)
+        chars = list(loc_raw)
         if (len(chars) >= 2
                 and 0x1F1E0 <= ord(chars[0]) <= 0x1F1FF
                 and 0x1F1E0 <= ord(chars[1]) <= 0x1F1FF):
@@ -825,60 +857,35 @@ def scrape_uxjobs() -> list[dict]:
             flag = chars[0]
         else:
             flag = ""
+        location = loc_raw[len(flag):].strip() if flag else loc_raw
 
-        # Location decision based on flag
         if flag in EXCLUDE_FLAGS:
             continue
-        if flag in EU_FLAGS:
-            location = "Europe / Remote"
-        else:
-            # No flag or unknown — fall through to text-based location_ok
-            location = "Remote"
+        if not location_ok(location):
+            continue
 
-        # Strip flag + location prefix, ATS name suffix, and age suffix from raw text
-        # Pattern: "🇩🇪 Remote-Europe, Remote-Munich TITLE - COMPANY ATS Xd ago"
-        import re as _re
-        # Remove leading flag and location description up to first uppercase word run
-        text = _re.sub(r'^[\U0001F1E0-\U0001F1FF\U0001F300-\U0001FFFF\s]+', '', raw).strip()
-        # Remove trailing age stamp ("12h ago", "3d ago", "1 day ago")
-        text = _re.sub(r'\s+\d+[hd]\s+ago\s*$', '', text).strip()
-        text = _re.sub(r'\s+\d+\s+days?\s+ago\s*$', '', text, flags=_re.I).strip()
-        # Remove trailing ATS source (known values from the site)
-        for ats in ["Ashby", "Greenhouse", "Lever", "Rippling", "Workday",
-                    "JazzHR", "Recruitee", "SmartRecruiters", "BambooHR",
-                    "iCIMS", "Personio", "Teamtailor", "Gem", "Workable",
-                    "Start-Ups & VC", "Direct Corp", "We Work Remotely",
-                    "Recruiters", "Eightfold"]:
-            if text.endswith(ats):
-                text = text[:-len(ats)].strip()
-                break
-
-        # Split "TITLE - COMPANY"
-        if " - " in text:
-            parts = text.rsplit(" - ", 1)
-            title = parts[0].strip()
-            company = parts[1].strip() if len(parts) > 1 else ""
+        # Title/company from the clean "Title - Company" text
+        title_company = title_el.get_text(separator=" ", strip=True)
+        if " - " in title_company:
+            title, company = title_company.rsplit(" - ", 1)
+            title, company = title.strip(), company.strip()
         else:
-            title = text
-            company = ""
+            title, company = title_company, ""
 
         if not title_matches_any(title):
             continue
         if is_blocked_company(company):
             continue
-        if not location_ok(location):
-            continue
 
-        # Age: not reliably extractable from the text after stripping, mark unknown
-        age_label, age_date = "Date unknown", None
-        # Try to re-extract from the raw string
-        age_match = _re.search(r'(\d+)([hd])\s+ago', raw)
-        if age_match:
-            n, unit = int(age_match.group(1)), age_match.group(2)
-            import datetime
-            delta = datetime.timedelta(hours=n if unit == "h" else n * 24)
-            age_date = (datetime.date.today() - delta)
-            age_label, age_date = parse_age(str(age_date))
+        time_el = card.select_one(".card-time")
+        raw_time = time_el.get_text(strip=True) if time_el else ""
+        age_label, age_date = parse_age(raw_time)
+        if age_date is None:
+            hour_match = re.search(r'(\d+)\s*h\s*ago', raw_time, re.I)
+            if hour_match:
+                delta = datetime.timedelta(hours=int(hour_match.group(1)))
+                age_date = TODAY - delta
+                age_label, age_date = parse_age(str(age_date))
 
         jobs.append({
             "title":         title,
@@ -998,10 +1005,10 @@ WATCHLIST = [
 WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
 
 
-def _watchlist_job(title, company, url, location, salary, tier) -> dict:
+def _watchlist_job(title, company, url, location, salary, tier, posted_at=None) -> dict:
     loc = location or "Remote / EU"
     salary = sanitise_salary(salary or "")
-    age_label, age_date = parse_age(None)
+    age_label, age_date = parse_age(posted_at)
     return {
         "title":          title,
         "company":        company,
@@ -1034,10 +1041,14 @@ def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list
             if not title_matches_any(title):
                 continue
             location = p.get("categories", {}).get("location", "")
+            # Lever's createdAt is epoch milliseconds
+            created_ms = p.get("createdAt")
+            posted_at = created_ms / 1000 if isinstance(created_ms, (int, float)) else None
             jobs.append(_watchlist_job(
                 title, company_name,
                 p.get("hostedUrl", base_url),
                 location, "", tier,
+                posted_at=posted_at,
             ))
         return jobs
     except Exception as e:
@@ -1065,6 +1076,7 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
                 title, company_name,
                 p.get("jobUrl", base_url),
                 loc, "", tier,
+                posted_at=p.get("publishedDate"),
             ))
         return jobs
     except Exception as e:
@@ -1090,6 +1102,7 @@ def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) ->
                 title, company_name,
                 p.get("absolute_url", base_url),
                 loc, "", tier,
+                posted_at=p.get("first_published") or p.get("updated_at"),
             ))
         return jobs
     except Exception as e:
@@ -1175,13 +1188,27 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
             print(f"  ✓ {len(results)} matching jobs")
             all_jobs.extend(results)
 
-            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0, "zero_result_streak": 0})
             h["last_fetch_date"] = today_str
             h["error_streak"]    = 0
 
+            # Fetch succeeded but matched nothing — track separately from fetch
+            # errors. A source whose CSS selectors silently stop matching after
+            # a site redesign will "succeed" with 0 results forever and never
+            # trip the error-streak alert, so this is the only signal that catches it.
+            if len(results) == 0:
+                h["zero_result_streak"] = h.get("zero_result_streak", 0) + 1
+                if h["zero_result_streak"] >= ZERO_RESULT_ALERT_DAYS:
+                    alerts.append(
+                        f"{name} — 0 matching jobs for {h['zero_result_streak']} consecutive days "
+                        f"(fetch succeeds — selectors may be stale)"
+                    )
+            else:
+                h["zero_result_streak"] = 0
+
         except Exception as e:
             print(f"  ✗ {name} failed: {e}")
-            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0})
+            h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0, "zero_result_streak": 0})
             h["error_streak"] = h.get("error_streak", 0) + 1
             if h["error_streak"] >= ERROR_ALERT_DAYS:
                 alerts.append(
