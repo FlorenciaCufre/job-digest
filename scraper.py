@@ -1582,98 +1582,44 @@ def build_email(
     <tr><td style="padding:0 32px 24px;">
       <p style="margin:0 0 10px;font-size:11px;font-weight:700;color:#374151;
                 text-transform:uppercase;letter-spacing:0.06em;">Also check manually</p>
-      <table cellpadding="0" cellspacing="0">
-        <tr>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://www.linkedin.com/jobs/search-results/?currentJobId=4393461497&keywords=%E2%80%98Lead%20product%20designer%E2%80%99&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=drPy10xnXjltv1HQD%2FkLdg%3D%3D&geoId=90009761&distance=0.0&f_TPR=r604800&f_SAL=f_SA_id_225001%3A272001"
-               style="display:inline-block;padding:5px 12px;background:#0a66c2;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              LinkedIn
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://wellfound.com/jobs"
-               style="display:inline-block;padding:5px 12px;background:#111827;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Wellfound
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://app.welcometothejungle.com/jobs"
-               style="display:inline-block;padding:5px 12px;background:#3d1f8c;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Welcome to the Jungle
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://www.glassdoor.es/Empleo/barcelona-senior-product-designer-empleos-SRCH_IL.0,9_IC2547194_KO10,33.htm?sortBy=date_desc"
-               style="display:inline-block;padding:5px 12px;background:#0caa41;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Glassdoor
-            </a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://flexa.careers/jobs?q=senior+product+designer"
-               style="display:inline-block;padding:5px 12px;background:#6d28d9;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Flexa
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://weloveproduct.co/"
-               style="display:inline-block;padding:5px 12px;background:#e11d48;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              WeLoveProduct
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://designjobs.world/jobs?q=senior+product+designer&seniority=senior&location_regions%5B%5D=Europe"
-               style="display:inline-block;padding:5px 12px;background:#1e293b;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              DesignJobs.World
-            </a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://remotive.com/remote-jobs/design"
-               style="display:inline-block;padding:5px 12px;background:#f97316;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Remotive
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://www.workingnomads.com/jobs?tag=product-design&location=europe"
-               style="display:inline-block;padding:5px 12px;background:#0891b2;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              WorkingNomads
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://nodesk.co/remote-jobs/design/"
-               style="display:inline-block;padding:5px 12px;background:#4c63b6;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              Nodesk
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://trulyremote.co/design"
-               style="display:inline-block;padding:5px 12px;background:#16003d;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              TrulyRemote
-            </a>
-          </td>
-          <td style="padding:0 8px 8px 0;">
-            <a href="https://dynamitejobs.com/remote-jobs/design/ux-web-design"
-               style="display:inline-block;padding:5px 12px;background:#ea580c;color:#fff;
-                      font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;">
-              DynamiteJobs
-            </a>
-          </td>
-        </tr>
-      </table>
+      <div style="line-height:2.4;">
+        <a href="https://www.linkedin.com/jobs/search-results/?currentJobId=4393461497&keywords=%E2%80%98Lead%20product%20designer%E2%80%99&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=drPy10xnXjltv1HQD%2FkLdg%3D%3D&geoId=90009761&distance=0.0&f_TPR=r604800&f_SAL=f_SA_id_225001%3A272001"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#0a66c2;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">LinkedIn</a>
+        <a href="https://wellfound.com/jobs"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#111827;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Wellfound</a>
+        <a href="https://app.welcometothejungle.com/jobs"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#3d1f8c;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">WTTJ</a>
+        <a href="https://www.glassdoor.es/Empleo/barcelona-senior-product-designer-empleos-SRCH_IL.0,9_IC2547194_KO10,33.htm?sortBy=date_desc"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#0caa41;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Glassdoor</a>
+        <a href="https://flexa.careers/jobs?q=senior+product+designer"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#6d28d9;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Flexa</a>
+        <a href="https://weloveproduct.co/"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#e11d48;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">WeLoveProduct</a>
+        <a href="https://designjobs.world/jobs?q=senior+product+designer&seniority=senior&location_regions%5B%5D=Europe"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#1e293b;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">DesignJobs.World</a>
+        <a href="https://remotive.com/remote-jobs/design"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#f97316;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Remotive</a>
+        <a href="https://www.workingnomads.com/jobs?tag=product-design&location=europe"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#0891b2;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">WorkingNomads</a>
+        <a href="https://nodesk.co/remote-jobs/design/"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#4c63b6;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Nodesk</a>
+        <a href="https://trulyremote.co/design"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#16003d;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">TrulyRemote</a>
+        <a href="https://dynamitejobs.com/remote-jobs/design/ux-web-design"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#ea580c;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">DynamiteJobs</a>
+      </div>
     </td></tr>
 
     <!-- Footer -->
