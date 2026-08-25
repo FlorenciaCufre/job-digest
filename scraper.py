@@ -8,7 +8,7 @@ Sources (4 APIs + 9 HTML scrapers + watchlist):
   Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
             TrulyRemote, UXJobs, DynamiteJobs,
             RemoteRebellion, UIUXDesignerJobs, RemoteInEurope
-  Watchlist: 23 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
+  Watchlist: 30 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
 
 Email footer includes manual check links:
   LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
@@ -1087,6 +1087,7 @@ WATCHLIST = [
     {"name": "Notion",         "url": "https://jobs.ashbyhq.com/notion",                      "ats": "ashby",      "tier": 2},
     {"name": "Linear",         "url": "https://jobs.ashbyhq.com/Linear",                      "ats": "ashby",      "tier": 2},
     {"name": "Superhuman",     "url": "https://jobs.ashbyhq.com/superhuman",                  "ats": "ashby",      "tier": 2},
+    {"name": "Octopus Energy", "url": "https://jobs.lever.co/octoenergy",                     "ats": "lever",      "tier": 2},
     # ── Tier 3 — speculative / small teams / rare openings ───────────────────
     # Rows removed — 404 on two URL attempts
     {"name": "Raycast",        "url": "https://www.raycast.com/careers",                      "ats": "html",       "tier": 3},
