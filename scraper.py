@@ -1781,6 +1781,9 @@ def build_email(
         <a href="https://dynamitejobs.com/remote-jobs/design/ux-web-design"
            style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#ea580c;color:#fff;
                   font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">DynamiteJobs</a>
+        <a href="https://funded-drop.app/inbox"
+           style="display:inline-block;margin:0 6px 6px 0;padding:5px 12px;background:#059669;color:#fff;
+                  font-size:12px;font-weight:600;text-decoration:none;border-radius:6px;white-space:nowrap;">Funded Drop</a>
       </div>
     </td></tr>
 
