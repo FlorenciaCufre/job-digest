@@ -3,12 +3,14 @@
 Job Scraper – Senior / Lead Product Designer
 Runs daily via GitHub Actions and sends a digest email via Resend.
 
-Sources (4 APIs + 9 HTML scrapers + watchlist):
-  APIs:    Remotive, 4DayWeek, Himalayas, Arbeitnow
-  Scrapers: WeWorkRemotely, WorkingNomads, Nodesk,
-            TrulyRemote, UXJobs, DynamiteJobs,
-            RemoteRebellion, UIUXDesignerJobs, RemoteInEurope
+Sources (4 APIs + 5 HTML scrapers + watchlist):
+  APIs:    4DayWeek, Himalayas, Arbeitnow, RemoteOK
+  Scrapers: WeWorkRemotely, UXJobs, RemoteRebellion,
+            RemoteInEurope, EURemoteJobs
   Watchlist: 30 pre-vetted companies via Lever / Ashby / Greenhouse / HTML
+
+  Retired (see comment above SCRAPERS below for why): Remotive,
+  WorkingNomads, Nodesk, TrulyRemote, DynamiteJobs, UIUXDesignerJobs
 
 Email footer includes manual check links:
   LinkedIn, Wellfound, Welcome to the Jungle, Glassdoor,
@@ -660,9 +662,24 @@ def scrape_arbeitnow() -> list[dict]:
                 company_name = j.get("company_name", "")
                 if is_blocked_company(company_name):
                     continue
-                if not j.get("remote", False):
-                    continue
+                # Arbeitnow's `remote` boolean is unreliable — confirmed live
+                # (Sep 2026): explicitly remote-labeled titles like "Full Remote
+                # - UK" come back with remote=false, while fixed-city onsite
+                # roles (Cologne, Stuttgart) come back remote=true. Trusting
+                # this flag alone silently discarded every genuine match,
+                # which is why this source sat at a 0-result health alert for
+                # weeks despite matching titles existing in the raw feed. Use
+                # a broader remote signal instead — API flag OR "remote"
+                # appearing in the title/location text — then let
+                # location_ok() below do the real EU/non-EU filtering.
                 location = j.get("location", "") or "Remote"
+                remote_signal = (
+                    j.get("remote", False)
+                    or "remote" in title.lower()
+                    or "remote" in location.lower()
+                )
+                if not remote_signal:
+                    continue
                 if not location_ok(location):
                     continue
                 age_label, age_date = parse_age(j.get("created_at") or j.get("date"))
@@ -865,6 +882,17 @@ def scrape_uxjobs() -> list[dict]:
             continue
         seen_urls.add(href)
 
+        # UXJobs aggregates a chunk of listings from jobs.dou.ua — Ukraine's
+        # IT jobs board. Confirmed live (Sep 2026): those cards show only a
+        # generic "🌍 Remote" location with no country signal, but the actual
+        # dou.ua posting underneath is a Ukrainian outsourcing agency hiring
+        # for specific Ukrainian cities ("remote" meaning remote-within-
+        # Ukraine, not EU-remote). Neither the flag check nor location_ok()
+        # can catch this from the card text alone — the domain itself is the
+        # only reliable signal, so hard-exclude it here.
+        if "dou.ua" in href:
+            continue
+
         # Split flag from the real location text
         loc_raw = loc_el.get_text(separator=" ", strip=True)
         chars = list(loc_raw)
@@ -1049,6 +1077,137 @@ def scrape_remoteineurope() -> list[dict]:
                 "age_date":      age_date,
                 "is_stretch":    title_is_stretch(title),
             })
+        time.sleep(0.5)
+
+    return jobs
+
+
+def scrape_remoteok() -> list[dict]:
+    """remoteok.com/api — free public JSON feed, no auth, capped at ~100
+    most-recent results per request (no pagination on the free tier).
+    Scoped with ?tags=design to stay relevant, but tags are NOT trusted as
+    the real filter — confirmed live (Sep 2026) that tagging is noisy (a
+    "Residential Technician" posting was tagged "design" alongside a dozen
+    unrelated tags). Every posting still runs through the same
+    title_matches_any() every other source uses.
+    Attribution: Remote OK's API terms ask for a link back to the original
+    posting URL and to be credited as the source — both already happen here
+    (url field + "RemoteOK" source label).
+    """
+    jobs = []
+    try:
+        r = requests.get(
+            "https://remoteok.com/api",
+            params={"tags": "design"},
+            headers=HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"  ⚠ RemoteOK error: {e}")
+        return jobs
+
+    for j in data:
+        if not isinstance(j, dict) or "position" not in j:
+            continue  # first element is a legal/terms blob, not a job
+        title = j.get("position", "")
+        if not title_matches_any(title):
+            continue
+        company_name = j.get("company", "")
+        if is_blocked_company(company_name):
+            continue
+        location = (j.get("location", "") or "").strip().rstrip(",").strip() or "Remote"
+        if not location_ok(location):
+            continue
+        description = j.get("description", "") or ""
+        if is_us_description(description):
+            continue
+        sal_min = j.get("salary_min") or 0
+        sal_max = j.get("salary_max") or 0
+        salary = f"${sal_min:,} – ${sal_max:,}" if sal_min and sal_max else ""
+        salary = sanitise_salary(salary)
+        url = j.get("url") or j.get("apply_url") or ""
+        age_label, age_date = parse_age(j.get("epoch") or j.get("date"))
+        jobs.append({
+            "title":         title,
+            "company":       company_name,
+            "location":      location,
+            "salary":        salary,
+            "url":           url,
+            "source":        "RemoteOK",
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": currency_flag(salary),
+            "age_label":     age_label,
+            "age_date":      age_date,
+            "is_stretch":    title_is_stretch(title),
+        })
+    return jobs
+
+
+def scrape_euremotejobs() -> list[dict]:
+    """euremotejobs.com — confirmed server-rendered (job data is present in
+    the raw HTML, not JS-injected). Each posting is a <div class="job-card">
+    wrapped in a parent <a href>. Paginated via ?paged=N, capped at 3 pages
+    (~120 postings) per run to keep the request count sane.
+    """
+    jobs = []
+    seen_urls = set()
+    for page in range(1, 4):
+        soup = fetch(f"https://euremotejobs.com/jobs/?search_keywords=design&paged={page}")
+        if not soup:
+            break
+
+        cards = soup.select(".job-card")
+        if not cards:
+            break
+
+        for card in cards:
+            title_el = card.select_one(".job-title")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            if not title_matches_any(title):
+                continue
+
+            link_el = card.find_parent("a", href=True)
+            href = link_el["href"] if link_el else ""
+            if not href or href in seen_urls:
+                continue
+            seen_urls.add(href)
+
+            company_el = card.select_one(".company-name")
+            company = company_el.get_text(strip=True) if company_el else ""
+            if is_blocked_company(company):
+                continue
+
+            loc_el = card.select_one(".meta-location")
+            location = loc_el.get_text(strip=True) if loc_el else "Europe"
+            if not location_ok(location) or not location_country_ok(location):
+                continue
+
+            time_el = card.select_one("time[datetime]")
+            raw_date = time_el["datetime"] if time_el and time_el.has_attr("datetime") else None
+            age_label, age_date = parse_age(raw_date)
+
+            jobs.append({
+                "title":         title,
+                "company":       company,
+                "location":      location,
+                "salary":        "",
+                "url":           href,
+                "source":        "EURemoteJobs",
+                "four_day":      False,
+                "spain_flag":    is_spain_only(location),
+                "currency_flag": "",
+                "age_label":     age_label,
+                "age_date":      age_date,
+                "is_stretch":    title_is_stretch(title),
+            })
+
+        if len(cards) < 40:
+            break
         time.sleep(0.5)
 
     return jobs
@@ -1273,6 +1432,8 @@ SCRAPERS = [
     ("UXJobs",           scrape_uxjobs),
     ("RemoteRebellion",  scrape_remoterebellion),
     ("RemoteInEurope",   scrape_remoteineurope),
+    ("RemoteOK",         scrape_remoteok),
+    ("EURemoteJobs",     scrape_euremotejobs),
     ("Watchlist",        scrape_watchlist),
 ]
 
