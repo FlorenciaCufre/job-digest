@@ -44,6 +44,14 @@ MAX_JOB_AGE_DAYS = 21   # hard-drop jobs older than this — safety net for date
 ERROR_ALERT_DAYS = 3    # consecutive fetch errors before health alert fires
 ZERO_RESULT_ALERT_DAYS = 5  # consecutive 0-result days (fetch OK, no matches) before health alert fires
 
+# What to do with a role that is remote but restricted to ONE European country
+# other than Spain ("Remote, Poland" · "Portugal Remote" · "Germany (Remote)").
+# These are EU-remote in the abstract but need residency in that country, so
+# they are not applicable from Barcelona.
+#   "flag" — show them, badged and sorted to the bottom (default)
+#   "drop" — hard-exclude them, same as a US role
+COUNTRY_RESTRICTED_MODE = "flag"
+
 # Primary roles — shown in main section
 TITLE_KEYWORDS = [
     "lead product designer",
@@ -126,6 +134,109 @@ US_DESCRIPTION_SIGNALS = [
 USD_SIGNALS = ["usd", "$ ", "us$"]
 GBP_SIGNALS = ["gbp", "£"]
 
+# Location strings arrive with wildly inconsistent separators — "Remote - UK",
+# "Remote · UK", "Remote, UK", "Remote- UK", "Remote (USA)", "Remote/US",
+# "Remote — United States". Matching raw text meant every new punctuation
+# variant was a fresh hole (confirmed live: "Remote- UK" reached the 4 Sep 2026
+# digest because only the spaced hyphen was listed). Normalising both sides
+# first collapses all of them onto one form, so the rules below are about
+# places, not punctuation.
+_LOC_SEPARATORS = re.compile(r"[\-–—·•|/\\(),;:\[\]{}]+")
+
+def _norm_loc(text: str) -> str:
+    """Lowercase, flatten every separator to a single space, collapse runs."""
+    if not text:
+        return ""
+    return " ".join(_LOC_SEPARATORS.sub(" ", text.lower()).split())
+
+
+# Tokens that mean "this is not restricted to one country" — presence of any of
+# these stops the single-country check below from firing.
+BROAD_REGION_TOKENS = {
+    "europe", "european", "eu", "eea", "emea", "worldwide", "anywhere",
+    "global", "globally", "international", "internationally",
+}
+
+# Tokens that mean Spain is in scope — she can take the role, so never flag it.
+SPAIN_TOKENS = {
+    "spain", "spanish", "es", "barcelona", "madrid", "valencia", "sevilla",
+    "seville", "bilbao", "malaga", "zaragoza", "murcia", "palma", "mallorca",
+    "canarias", "canary", "catalonia", "catalunya", "cataluna",
+}
+
+# European countries that are fine in principle but, named alone, mean
+# "you must live here". Matched as whole tokens after normalisation.
+EU_COUNTRY_NAMES = {
+    "poland": "Poland", "polska": "Poland", "polish": "Poland",
+    "portugal": "Portugal", "portuguese": "Portugal",
+    "germany": "Germany", "deutschland": "Germany", "german": "Germany",
+    "france": "France", "french": "France",
+    "italy": "Italy", "italian": "Italy",
+    "netherlands": "Netherlands", "holland": "Netherlands", "dutch": "Netherlands",
+    "ireland": "Ireland", "irish": "Ireland",
+    "belgium": "Belgium", "belgian": "Belgium",
+    "austria": "Austria", "austrian": "Austria",
+    "sweden": "Sweden", "swedish": "Sweden",
+    "denmark": "Denmark", "danish": "Denmark",
+    "finland": "Finland", "finnish": "Finland",
+    "norway": "Norway", "norwegian": "Norway",
+    "switzerland": "Switzerland", "swiss": "Switzerland",
+    "czechia": "Czechia", "czech": "Czechia",
+    "romania": "Romania", "romanian": "Romania",
+    "bulgaria": "Bulgaria", "bulgarian": "Bulgaria",
+    "greece": "Greece", "greek": "Greece",
+    "hungary": "Hungary", "hungarian": "Hungary",
+    "croatia": "Croatia", "croatian": "Croatia",
+    "slovakia": "Slovakia", "slovak": "Slovakia",
+    "slovenia": "Slovenia", "slovenian": "Slovenia",
+    "lithuania": "Lithuania", "lithuanian": "Lithuania",
+    "latvia": "Latvia", "latvian": "Latvia",
+    "estonia": "Estonia", "estonian": "Estonia",
+    "ukraine": "Ukraine", "ukrainian": "Ukraine",
+    "serbia": "Serbia", "serbian": "Serbia",
+    "turkey": "Turkey", "turkish": "Turkey", "turkiye": "Turkey",
+    "cyprus": "Cyprus", "malta": "Malta", "maltese": "Malta",
+    "luxembourg": "Luxembourg", "iceland": "Iceland", "albania": "Albania",
+    "moldova": "Moldova", "georgia": "Georgia", "armenia": "Armenia",
+}
+
+# ISO-2 codes, deliberately only the ones that are not also ordinary words or
+# fragments of place names. "de", "fr", "it", "be", "es", "ca" are left out on
+# purpose — "Palma de Mallorca" must not read as Germany.
+EU_COUNTRY_CODES = {
+    "pl": "Poland", "pt": "Portugal", "nl": "Netherlands", "cz": "Czechia",
+    "ro": "Romania", "bg": "Bulgaria", "hu": "Hungary", "hr": "Croatia",
+    "sk": "Slovakia", "si": "Slovenia", "lt": "Lithuania", "lv": "Latvia",
+    "ee": "Estonia", "ua": "Ukraine", "rs": "Serbia", "tr": "Turkey",
+    "cy": "Cyprus", "mt": "Malta", "lu": "Luxembourg", "ie": "Ireland",
+    "dk": "Denmark", "fi": "Finland", "se": "Sweden", "at": "Austria",
+    "ch": "Switzerland", "gr": "Greece",
+}
+
+
+def country_restriction(location: str) -> str:
+    """Return the country a remote role is restricted to, or "" if it isn't.
+
+    Fires on "Remote, Poland" · "Remote, PL" · "Portugal Remote" ·
+    "Germany (Remote)". Stays silent on anything naming Spain, and on anything
+    naming a broad region ("EMEA", "Europe", "Remote International")."""
+    norm = _norm_loc(location)
+    if not norm:
+        return ""
+    toks = set(norm.split())
+    if toks & SPAIN_TOKENS or toks & BROAD_REGION_TOKENS:
+        return ""
+
+    found = []
+    for tok in norm.split():
+        name = EU_COUNTRY_NAMES.get(tok) or (
+            EU_COUNTRY_CODES.get(tok) if len(tok) == 2 else None
+        )
+        if name and name not in found:
+            found.append(name)
+    return " / ".join(found)
+
+
 # Countries that hard-exclude a job even when other structured signals (e.g. a
 # "Remote" API field) would otherwise let it through. Used where a source gives
 # us real country data (not just free text) — e.g. 4DayWeek's remote_allowed.
@@ -141,17 +252,44 @@ NON_EU_HARD_EXCLUDE_COUNTRIES = {
 }
 
 
+# Filler words that carry no place information, stripped from either end
+# before the remainder is read as a country name.
+_LOC_FILLER = {"remote", "worldwide", "only", "based", "job", "jobs",
+               "hybrid", "onsite", "on", "site", "work", "from", "home",
+               "anywhere", "in", "the", "full", "time", "fulltime"}
+
+# ISO-2 and shorthand for the hard-excluded countries above. Same rule as
+# EU_COUNTRY_CODES: nothing that doubles as an ordinary word.
+_NON_EU_CODE_ALIASES = {
+    "namer": "united states", "na": "united states", "usa": "united states",
+    "us": "united states", "u s": "united states", "u s a": "united states",
+    "uk": "united kingdom", "gb": "united kingdom", "gbr": "united kingdom",
+    "britain": "united kingdom", "great britain": "united kingdom",
+    "england": "united kingdom", "scotland": "united kingdom",
+    "wales": "united kingdom",
+    "can": "canada", "aus": "australia", "nz": "new zealand",
+    "ind": "india", "bra": "brazil", "sg": "singapore", "ph": "philippines",
+    "za": "south africa", "jp": "japan", "kr": "south korea",
+}
+
+
 def location_country_ok(location: str) -> bool:
     """Hard-exclude check for sources that give a bare 'Remote <Country>'
     string (e.g. "Remote US", "Remote Thailand"). location_ok() alone would
     wave these through just because they contain the word "remote" — this
-    strips that prefix and checks the actual place name underneath."""
-    loc = location.lower().strip()
-    bare = re.sub(r'^(remote|worldwide)\s*[-–,]?\s*', '', loc).strip()
+    strips the filler and checks the actual place name underneath.
+
+    Handles the country on either side of the filler: "Remote US" and
+    "US Remote" and "Remote (US)" all reduce to "united states"."""
+    norm = _norm_loc(location)
+    if not norm:
+        return True
+
+    bare = " ".join(t for t in norm.split() if t not in _LOC_FILLER).strip()
     if not bare:
         return True
-    aliases = {"namer": "united states", "na": "united states", "usa": "united states"}
-    bare = aliases.get(bare, bare)
+
+    bare = _NON_EU_CODE_ALIASES.get(bare, bare)
     return bare not in NON_EU_HARD_EXCLUDE_COUNTRIES
 
 # Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
@@ -255,17 +393,30 @@ def title_is_stretch(title: str) -> bool:
 def title_matches_any(title: str) -> bool:
     return title_matches(title) or title_is_stretch(title)
 
+# Exclusion phrases, pre-normalised once at import so that punctuation variants
+# ("remote · usa", "remote - usa", "remote, usa") all collapse to the same
+# thing and the raw list above stays human-readable.
+_EXCLUDE_LOCATION_NORM = sorted({_norm_loc(x) for x in EXCLUDE_LOCATION if _norm_loc(x)})
+
+# Standalone tokens that mean a hard-excluded country wherever they appear.
+_EXCLUDE_LOCATION_TOKENS = {"usa", "us", "uk", "gb", "canada", "britain", "england"}
+
+
 def location_ok(location: str) -> bool:
-    loc = location.lower().strip()
+    loc = _norm_loc(location)
     if not loc:
         return True
-    if any(ex in loc for ex in EXCLUDE_LOCATION):
+    if any(ex in loc for ex in _EXCLUDE_LOCATION_NORM):
         return False
-    if loc in ("usa", "united states", "us", "remote usa", "remote us",
-               "uk", "united kingdom", "remote uk",
-               "north america", "canada"):
+    if _EXCLUDE_LOCATION_TOKENS & set(loc.split()):
         return False
-    return any(kw in loc for kw in LOCATION_KEYWORDS)
+    if not any(kw in loc for kw in LOCATION_KEYWORDS):
+        return False
+    # "Remote <Country>" needs the country read, not just the word "remote".
+    # Previously only the three sources added on 4 Sep 2026 called this; every
+    # other source waved "Remote, PL" through. Folding it in here means one
+    # rule for all of them.
+    return location_country_ok(location)
 
 def is_us_description(description: str) -> bool:
     if not description:
@@ -1437,6 +1588,36 @@ SCRAPERS = [
     ("Watchlist",        scrape_watchlist),
 ]
 
+# Sources that return structured data over an API. A 0-result day here cannot
+# be stale CSS selectors — there are no selectors — so the health alert says
+# something different. (Arbeitnow spent Aug–Sep 2026 alerting about selectors
+# it does not have; the actual bug was its `remote` boolean returning
+# backwards.) Everything not listed here is an HTML scrape.
+API_SOURCES = {"4DayWeek", "Himalayas", "Arbeitnow", "RemoteOK"}
+
+
+def _zero_result_reason(name: str) -> str:
+    if name == "Watchlist":
+        return "fetch succeeds — check whether a company moved ATS"
+    if name in API_SOURCES:
+        return "fetch succeeds — API returned nothing matching; check the query or its response shape"
+    return "fetch succeeds — selectors may be stale"
+
+
+def apply_country_restriction(jobs: list[dict]) -> list[dict]:
+    """Tag (or drop) roles restricted to one European country other than Spain.
+
+    Applied here rather than inside each scraper so there is one rule for all
+    ten sources instead of ten copies of it. See COUNTRY_RESTRICTED_MODE."""
+    out = []
+    for j in jobs:
+        country = country_restriction(j.get("location", ""))
+        if country and COUNTRY_RESTRICTED_MODE == "drop":
+            continue
+        j["country_flag"] = country
+        out.append(j)
+    return out
+
 
 def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     all_jobs = []
@@ -1447,6 +1628,7 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
         print(f"→ {name}...")
         try:
             results = fn()
+            results = apply_country_restriction(results)
             print(f"  ✓ {len(results)} matching jobs")
             all_jobs.extend(results)
 
@@ -1463,7 +1645,7 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
                 if h["zero_result_streak"] >= ZERO_RESULT_ALERT_DAYS:
                     alerts.append(
                         f"{name} — 0 matching jobs for {h['zero_result_streak']} consecutive days "
-                        f"(fetch succeeds — selectors may be stale)"
+                        f"({_zero_result_reason(name)})"
                     )
             else:
                 h["zero_result_streak"] = 0
@@ -1544,6 +1726,10 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
         badges += '<span style="display:inline-block;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🟢 4-day week</span>'
     if j.get("spain_flag"):
         badges += '<span style="display:inline-block;background:#fff7ed;color:#c2410c;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">⚠️ Verify location</span>'
+    if j.get("country_flag"):
+        badges += (f'<span style="display:inline-block;background:#fef2f2;color:#9f1239;'
+                   f'font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;'
+                   f'margin-right:5px;">📍 {j["country_flag"]} only — needs residency</span>')
     if j.get("currency_flag") == "usd":
         badges += '<span style="display:inline-block;background:#fef2f2;color:#991b1b;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇺🇸 USD — likely US hire</span>'
     if j.get("currency_flag") == "gbp":
@@ -1602,6 +1788,7 @@ def build_email(
 
     four_day_count = sum(1 for j in new_jobs + repost_jobs if j.get("four_day"))
     spain_count    = sum(1 for j in new_jobs + repost_jobs if j.get("spain_flag"))
+    country_count  = sum(1 for j in new_jobs + repost_jobs if j.get("country_flag"))
 
     # Summary pills
     if is_silence_breaker:
@@ -1631,6 +1818,11 @@ def build_email(
         &nbsp;<span style="background:#fff7ed;color:#c2410c;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
           ⚠️ {spain_count} × verify location
         </span>"""
+        if country_count:
+            pills += f"""
+        &nbsp;<span style="background:#fef2f2;color:#9f1239;font-size:13px;font-weight:600;padding:4px 12px;border-radius:20px;">
+          📍 {country_count} × single-country
+        </span>"""
 
     # Alert banner
     alert_html = ""
@@ -1653,7 +1845,9 @@ def build_email(
         if not jobs:
             return ""
         by_source: dict[str, list] = {}
-        for j in sorted(jobs, key=lambda x: (not x.get("four_day"), x.get("spain_flag", False))):
+        for j in sorted(jobs, key=lambda x: (not x.get("four_day"),
+                                             bool(x.get("country_flag")),
+                                             x.get("spain_flag", False))):
             by_source.setdefault(j["source"], []).append(j)
 
         label_color = "#7c3aed" if is_stretch_section else "#374151"
@@ -1718,6 +1912,7 @@ def build_email(
     <tr><td style="padding:4px 32px 8px;">
       <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6;">
         🟢 4-day week &nbsp;|&nbsp; ⚠️ Verify location/hybrid &nbsp;|&nbsp;
+        📍 Single country — needs residency there &nbsp;|&nbsp;
         🔄 Repost — role still open &nbsp;|&nbsp;
         🔭 Stretch — Staff/Principal at smaller companies &nbsp;|&nbsp;
         🇺🇸 USD — likely US hire &nbsp;|&nbsp; 🇬🇧 GBP — verify eligibility &nbsp;|&nbsp;
