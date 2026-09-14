@@ -36,6 +36,18 @@ EMAIL_FROM      = os.environ.get("EMAIL_FROM", "jobs@yourdomain.com")
 SEEN_JOBS_FILE  = Path("seen_jobs.json")
 HEALTH_FILE     = Path("source_health.json")
 
+# Optional outside watchdog (healthchecks.io or similar). The scraper pings it
+# on every completed run; if the ping stops arriving, THEY email you.
+#
+# This exists because the silence-breaker below cannot do that job. It is
+# computed inside the run, so it can only report silence when a run happens —
+# and the failure it most needs to report is the run not happening at all.
+# Confirmed live: the scheduled run was dropped on 10, 11 and 13 Sep 2026 (the
+# zero-result streak counters advanced by one between digests instead of three,
+# which is only possible if the days in between never ran). Leave unset and
+# nothing breaks; the ping is simply skipped.
+HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL", "")
+
 REPOST_DAYS     = 14    # resurface a seen job if reposted after this many days
 PRUNE_DAYS      = 30    # remove seen_jobs entries not seen for this many days
 SILENCE_DAYS    = 3     # send a health ping if no email sent for this many days
@@ -43,6 +55,12 @@ SALARY_MAX      = 500_000  # sanity cap — values above this are display bugs
 MAX_JOB_AGE_DAYS = 21   # hard-drop jobs older than this — safety net for date parsing failures
 ERROR_ALERT_DAYS = 3    # consecutive fetch errors before health alert fires
 ZERO_RESULT_ALERT_DAYS = 5  # consecutive 0-result days (fetch OK, no matches) before health alert fires
+
+# A watchlist company whose job board returns NO postings at all — not "no
+# matching postings", none whatsoever — for this many days is a dead slug or a
+# moved ATS. Deliberately not "no matches": a company can legitimately have no
+# design role open for months, and alerting on that would be constant noise.
+WATCHLIST_DEAD_DAYS = 14
 
 # What to do with a role that is remote but restricted to ONE European country
 # other than Spain ("Remote, Poland" · "Portugal Remote" · "Germany (Remote)").
@@ -68,13 +86,21 @@ STRETCH_TITLE_KEYWORDS = [
     "head of product design",
 ]
 
-# Leadership/C-level — excluded entirely, never shown
+# Leadership/C-level — excluded entirely, never shown.
+# Matched as substrings, so every entry here must be long enough to be
+# unambiguous — see EXCLUDE_TITLE_WORDS below for the short ones.
 EXCLUDE_TITLE_KEYWORDS = [
-    "vp ", "vp,", "vice president",
+    "vice president",
     "director of design", "design director",
-    "chief design officer", "cdo",
+    "chief design officer",
     "head of design",
 ]
+
+# Short abbreviations, matched as whole words only. "cdo" as a substring also
+# fires inside ordinary words (mcdonald, and anything else with those three
+# letters in a row) — the same class of bug as the "Remote- UK" leak, caught
+# before it cost anything.
+EXCLUDE_TITLE_WORDS = {"vp", "cdo", "svp", "evp"}
 
 LOCATION_KEYWORDS = [
     "remote", "spain", "barcelona", "europe", "eu", "worldwide",
@@ -292,6 +318,57 @@ def location_country_ok(location: str) -> bool:
     bare = _NON_EU_CODE_ALIASES.get(bare, bare)
     return bare not in NON_EU_HARD_EXCLUDE_COUNTRIES
 
+# ── Geography hidden in the job title ────────────────────────────────────────
+#
+# US/UK timezone shorthand. Standalone tokens only — these are abbreviations,
+# never fragments of other words, so whole-word matching is both safe and
+# necessary ("est" inside "greatest" must not fire).
+TITLE_TIMEZONE_TOKENS = {
+    "pst", "pdt", "est", "edt", "cst", "cdt", "mst", "mdt", "akst", "hst",
+}
+
+# Multi-word timezone and region phrases, matched as substrings of the
+# normalised title.
+TITLE_EXCLUDE_PHRASES = [
+    "pacific time", "eastern time", "central time", "mountain time",
+    "pacific timezone", "eastern timezone",
+    "united states", "united kingdom", "north america",
+    "us based", "usa based", "uk based", "us remote", "uk remote",
+    "us only", "uk only", "usa only",
+]
+
+# Country and region tokens. Same whole-word rule.
+TITLE_EXCLUDE_TOKENS = {
+    "us", "usa", "uk", "gb", "canada", "canadian", "england", "britain",
+    "american", "americas", "latam", "apac",
+}
+
+# Cities, kept deliberately short. Each one here costs a genuine role if it is
+# ever ambiguous, and volume is already thin — so this holds only places that
+# cannot plausibly mean anything else in a job title. Easy to extend later.
+TITLE_EXCLUDE_CITIES = [
+    "new york", "nyc", "san francisco", "london", "toronto",
+]
+
+
+def title_location_excluded(title: str) -> bool:
+    """True when the TITLE names a place or timezone outside scope.
+
+    Hard-exclude only — deliberately not location_ok(), which requires a
+    positive signal ("remote", "europe") to be present. Most titles contain no
+    location language at all, so running them through location_ok() would
+    reject nearly everything."""
+    norm = _norm_loc(title)
+    if not norm:
+        return False
+    if any(p in norm for p in TITLE_EXCLUDE_PHRASES):
+        return True
+    if any(c in norm for c in TITLE_EXCLUDE_CITIES):
+        return True
+    words = set(norm.split())
+    return bool(words & TITLE_TIMEZONE_TOKENS or words & TITLE_EXCLUDE_TOKENS)
+
+
 # Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
 # Add to this list as more slip through — lowercase, matched as substring of company name.
 US_COMPANY_BLOCKLIST = [
@@ -319,9 +396,17 @@ US_COMPANY_BLOCKLIST = [
     "vercel",
 ]
 
-def is_blocked_company(company: str) -> bool:
-    c = company.lower()
-    return any(blocked in c for blocked in US_COMPANY_BLOCKLIST)
+def is_blocked_company(company: str, url: str = "") -> bool:
+    """Blocked by company name OR by the URL the posting sits on.
+
+    The URL half matters: "rippling" has been on this list all along, but a
+    role posted through ats.rippling.com carries the client's name, not
+    Rippling's, so the name check never fired. Two roles reached the digest
+    that way (21 Aug and 14 Sep 2026)."""
+    haystack = company.lower()
+    if url:
+        haystack = f"{haystack} {url.lower()}"
+    return any(blocked in haystack for blocked in US_COMPANY_BLOCKLIST)
 
 
 HEADERS = {
@@ -333,6 +418,30 @@ HEADERS = {
 }
 
 TODAY = datetime.date.today()
+
+# ── Raw listing counts, per source ───────────────────────────────────────────
+#
+# How many listings a source handed us BEFORE any filtering. Without this,
+# "the site changed and we can no longer read it" and "the site is fine,
+# nothing matched your filters" produce identical output — zero jobs — and the
+# health alert cannot tell you which. Three sources spent over a week alerting
+# with nobody able to say which of the two it was.
+#
+# Each scraper records its count as soon as it has parsed the listings; the
+# alert builder reads it. A source that never records one reports "unknown".
+SOURCE_RAW_COUNTS: dict[str, int] = {}
+
+# Per-company watchlist detail: postings returned and the last error, if any.
+# The watchlist reports as a single source, so one dead company is invisible
+# behind twenty-nine working ones.
+WATCHLIST_RAW: dict[str, dict] = {}
+
+
+def _record_raw(source: str, count: int, add: bool = False):
+    if add:
+        SOURCE_RAW_COUNTS[source] = SOURCE_RAW_COUNTS.get(source, 0) + count
+    else:
+        SOURCE_RAW_COUNTS[source] = count
 
 # ── Persistence helpers ───────────────────────────────────────────────────────
 
@@ -375,8 +484,22 @@ def job_id(title: str, company: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 def title_is_excluded(title: str) -> bool:
+    """Excluded for seniority (VP/Director/CDO) or for geography.
+
+    Geography in the title is a real and separate hole: every location rule in
+    this file reads the location FIELD, and postings increasingly put the place
+    in the title while leaving the field as a bare "Remote". Both of these
+    reached the digest with location == "Remote":
+      · "Senior Product Designer, London, UK"                  (14 Sep 2026)
+      · "Lead Product Designer ... Remote, PST Time Zone"      (12 Sep 2026)
+    """
     t = title.lower()
-    return any(kw in t for kw in EXCLUDE_TITLE_KEYWORDS)
+    if any(kw in t for kw in EXCLUDE_TITLE_KEYWORDS):
+        return True
+    words = set(_norm_loc(title).split())
+    if words & EXCLUDE_TITLE_WORDS:
+        return True
+    return title_location_excluded(title)
 
 def title_matches(title: str) -> bool:
     if title_is_excluded(title):
@@ -435,8 +558,10 @@ def currency_flag(salary: str) -> str:
     return ""
 
 def is_spain_only(location: str) -> bool:
-    loc = location.lower()
-    if any(sig in loc for sig in SPAIN_ONLY_SIGNALS):
+    # Normalised like every other location check — this was the one function
+    # left reading raw text after the 10 Sep 2026 cleanup.
+    loc = _norm_loc(location)
+    if any(_norm_loc(sig) in loc for sig in SPAIN_ONLY_SIGNALS):
         return True
     has_spain = any(x in loc for x in ["spain", "barcelona", "madrid"])
     has_remote = any(x in loc for x in ["remote", "anywhere", "worldwide", "global"])
@@ -575,48 +700,6 @@ def fetch(url: str, timeout: int = 15, retries: int = 1) -> BeautifulSoup | None
 
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
-def scrape_remotive() -> list[dict]:
-    jobs = []
-    try:
-        r = requests.get(
-            "https://remotive.com/api/remote-jobs",
-            params={"category": "Design", "limit": 100},
-            timeout=15,
-        )
-        for j in r.json().get("jobs", []):
-            title = j.get("title", "")
-            if not title_matches_any(title):
-                continue
-            company_name = j.get("company_name", "")
-            if is_blocked_company(company_name):
-                continue
-            location = j.get("candidate_required_location", "")
-            if not location_ok(location):
-                continue
-            description = j.get("description", "") or ""
-            if is_us_description(description):
-                continue
-            salary = sanitise_salary(j.get("salary", "") or "")
-            age_label, age_date = parse_age(j.get("publication_date") or j.get("posted"))
-            jobs.append({
-                "title":         title,
-                "company":       company_name,
-                "location":      location or "Remote",
-                "salary":        salary,
-                "url":           j.get("url", ""),
-                "source":        "Remotive",
-                "four_day":      False,
-                "spain_flag":    is_spain_only(location),
-                "currency_flag": currency_flag(salary),
-                "age_label":     age_label,
-                "age_date":      age_date,
-                "is_stretch":    title_is_stretch(title),
-            })
-    except Exception as e:
-        print(f"  ⚠ Remotive error: {e}")
-    return jobs
-
-
 def scrape_4dayweek() -> list[dict]:
     jobs = []
     page = 1
@@ -635,6 +718,7 @@ def scrape_4dayweek() -> list[dict]:
             )
             data = r.json()
             items = data.get("data", [])
+            _record_raw("4DayWeek", len(items), add=True)
             if not items:
                 break
             for j in items:
@@ -736,6 +820,7 @@ def scrape_himalayas() -> list[dict]:
                 )
                 data = r.json()
                 items = data if isinstance(data, list) else data.get("jobs", [])
+                _record_raw("Himalayas", len(items), add=True)
                 if not items:
                     break
                 for j in items:
@@ -804,6 +889,7 @@ def scrape_arbeitnow() -> list[dict]:
                 break
 
             items = data.get("data", [])
+            _record_raw("Arbeitnow", len(items), add=True)
             if not items:
                 break
             for j in items:
@@ -863,7 +949,9 @@ def scrape_weworkremotely() -> list[dict]:
     soup = fetch("https://weworkremotely.com/categories/remote-design-jobs.rss")
     if not soup:
         return jobs
-    for item in soup.find_all("item"):
+    items = soup.find_all("item")
+    _record_raw("WeWorkRemotely", len(items))
+    for item in items:
         title_tag = item.find("title")
         if not title_tag:
             continue
@@ -899,100 +987,6 @@ def scrape_weworkremotely() -> list[dict]:
     return jobs
 
 
-def _html_scraper(
-    url: str,
-    source: str,
-    card_sel: str,
-    title_sel: str,
-    company_sel: str,
-    location_sel: str,
-    link_sel: str,
-    base_url: str = "",
-    default_location: str = "Remote",
-    date_sel: str = "",
-) -> list[dict]:
-    jobs = []
-    soup = fetch(url)
-    if not soup:
-        return jobs
-    for card in soup.select(card_sel):
-        title_el    = card.select_one(title_sel)
-        company_el  = card.select_one(company_sel) if company_sel else None
-        location_el = card.select_one(location_sel) if location_sel else None
-        link_el     = card.select_one(link_sel) if link_sel else None
-        date_el     = card.select_one(date_sel) if date_sel else None
-        if not title_el:
-            continue
-        title = title_el.get_text(strip=True)
-        if not title_matches_any(title):
-            continue
-        company = company_el.get_text(strip=True) if company_el else ""
-        if is_blocked_company(company):
-            continue
-        location = location_el.get_text(strip=True) if location_el else default_location
-        if not location_ok(location):
-            continue
-        href = link_el["href"] if link_el and link_el.has_attr("href") else ""
-        url_full = f"{base_url}{href}" if href.startswith("/") else href
-        raw_date = date_el.get_text(strip=True) if date_el else None
-        age_label, age_date = parse_age(raw_date)
-        jobs.append({
-            "title":         title,
-            "company":       company,
-            "location":      location,
-            "salary":        "",
-            "url":           url_full,
-            "source":        source,
-            "four_day":      False,
-            "spain_flag":    is_spain_only(location),
-            "currency_flag": "",
-            "age_label":     age_label,
-            "age_date":      age_date,
-            "is_stretch":    title_is_stretch(title),
-        })
-    return jobs
-
-
-def scrape_workingnomads() -> list[dict]:
-    return _html_scraper(
-        url="https://www.workingnomads.com/jobs?tag=product-design&location=europe",
-        source="WorkingNomads",
-        card_sel=".job-item, [class*='job_item'], article",
-        title_sel="h2, h3, h4, [class*='title']",
-        company_sel="[class*='company'], .company",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://www.workingnomads.com",
-        default_location="Europe / Remote",
-        date_sel="[class*='date'], time",
-    )
-
-def scrape_nodesk() -> list[dict]:
-    return _html_scraper(
-        url="https://nodesk.co/remote-jobs/?query=product+design",
-        source="Nodesk",
-        card_sel="article, .job, [class*='job-item']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://nodesk.co",
-        date_sel="time, [class*='date']",
-    )
-
-def scrape_trulyremote() -> list[dict]:
-    return _html_scraper(
-        url="https://trulyremote.co/?search=senior+product+designer",
-        source="TrulyRemote",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
 def scrape_uxjobs() -> list[dict]:
     """jobs.uxjobs.io — remote product designer jobs, aggregated daily.
     Each listing is an <article class="card"> with clean sub-elements:
@@ -1020,8 +1014,11 @@ def scrape_uxjobs() -> list[dict]:
     if not soup:
         return jobs
 
+    cards = soup.select("article.card")
+    _record_raw("UXJobs", len(cards))
+
     seen_urls = set()
-    for card in soup.select("article.card"):
+    for card in cards:
         link_el = card.select_one("a.card-link[href]") or card.select_one("a[href]")
         loc_el = card.select_one(".card-loc")
         title_el = card.select_one(".card-title")
@@ -1102,20 +1099,6 @@ def scrape_uxjobs() -> list[dict]:
 
     return jobs
 
-def scrape_dynamitejobs() -> list[dict]:
-    return _html_scraper(
-        url="https://dynamitejobs.com/remote-jobs/design/ux-web-design",
-        source="DynamiteJobs",
-        card_sel="[class*='job'], article, [class*='listing']",
-        title_sel="h2, h3, [class*='title']",
-        company_sel="[class*='company'], [class*='employer']",
-        location_sel="[class*='location']",
-        link_sel="a[href]",
-        base_url="https://dynamitejobs.com",
-        default_location="Remote",
-        date_sel="time, [class*='date']",
-    )
-
 def scrape_remoterebellion() -> list[dict]:
     """remoterebellion.com/remote-design-jobs is a Squarespace rich-text
     block — postings are plain <a>Title (Location)</a> links with no
@@ -1127,8 +1110,16 @@ def scrape_remoterebellion() -> list[dict]:
     if not soup:
         return jobs
 
+    # Raw count is "anchors shaped like a posting", since this page has no job
+    # markup to count — that shape going to zero is the signal the Squarespace
+    # block changed.
+    anchors = soup.find_all("a", href=True)
+    _record_raw("RemoteRebellion", sum(
+        1 for a in anchors if re.match(r'^(.*)\(([^)]+)\)\s*$', a.get_text(strip=True))
+    ))
+
     seen_urls = set()
-    for a in soup.find_all("a", href=True):
+    for a in anchors:
         text = a.get_text(strip=True)
         m = re.match(r'^(.*)\(([^)]+)\)\s*$', text)
         if not m:
@@ -1186,7 +1177,10 @@ def scrape_remoteineurope() -> list[dict]:
         if not soup:
             continue
 
-        for card in soup.select("a.card.job"):
+        cards = soup.select("a.card.job")
+        _record_raw("RemoteInEurope", len(cards), add=True)
+
+        for card in cards:
             href = card.get("href", "")
             if href in seen_urls:
                 continue
@@ -1259,6 +1253,10 @@ def scrape_remoteok() -> list[dict]:
         print(f"  ⚠ RemoteOK error: {e}")
         return jobs
 
+    _record_raw("RemoteOK", sum(
+        1 for j in data if isinstance(j, dict) and "position" in j
+    ))
+
     for j in data:
         if not isinstance(j, dict) or "position" not in j:
             continue  # first element is a legal/terms blob, not a job
@@ -1311,6 +1309,7 @@ def scrape_euremotejobs() -> list[dict]:
             break
 
         cards = soup.select(".job-card")
+        _record_raw("EURemoteJobs", len(cards), add=True)
         if not cards:
             break
 
@@ -1410,25 +1409,50 @@ WATCHLIST_TIER_LABELS = {1: "⭐ Tier 1", 2: "📌 Tier 2", 3: "🔍 Tier 3"}
 
 
 def _watchlist_job(title, company, url, location, salary, tier, posted_at=None) -> dict:
-    loc = location or "Remote / EU"
+    """Build a watchlist row.
+
+    Note what this no longer does. It used to substitute "Remote / EU" whenever
+    a location was missing — which is most of the HTML-scraped companies, since
+    a careers page rarely marks one up. That string was not read from anywhere;
+    it was invented and then shown as fact. A missing location is now shown as
+    missing and badged, so a US-only role at a watchlist company reads as
+    unverified rather than as European."""
+    loc = (location or "").strip()
     salary = sanitise_salary(salary or "")
     age_label, age_date = parse_age(posted_at)
     return {
-        "title":          title,
-        "company":        company,
-        "location":       loc,
-        "salary":         salary,
-        "url":            url,
-        "source":         f"Watchlist · {company}",
-        "four_day":       False,
-        "spain_flag":     is_spain_only(loc),
-        "currency_flag":  currency_flag(salary),
-        "age_label":      age_label,
-        "age_date":       age_date,
-        "watchlist":      True,
-        "watchlist_tier": tier,
-        "is_stretch":     title_is_stretch(title),
+        "title":            title,
+        "company":          company,
+        "location":         loc or "Location not listed",
+        "salary":           salary,
+        "url":              url,
+        "source":           f"Watchlist · {company}",
+        "four_day":         False,
+        "spain_flag":       is_spain_only(loc),
+        "currency_flag":    currency_flag(salary),
+        "age_label":        age_label,
+        "age_date":         age_date,
+        "watchlist":        True,
+        "watchlist_tier":   tier,
+        "location_unknown": not loc,
+        "is_stretch":       title_is_stretch(title),
     }
+
+
+def _watchlist_location_ok(location: str) -> bool:
+    """Location gate for watchlist companies.
+
+    Watchlist roles used to skip location filtering entirely — the helpers
+    checked the title and nothing else, so a "Senior Product Designer, San
+    Francisco" at a watchlist company would have gone straight into the digest.
+
+    An EMPTY location still passes. These are thirty hand-picked companies and
+    a missing location is not evidence of anything; the row is badged instead
+    so the gap is visible. A location that is present must clear the same bar
+    as every other source."""
+    if not (location or "").strip():
+        return True
+    return location_ok(location)
 
 
 def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list[dict]:
@@ -1439,12 +1463,16 @@ def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list
             timeout=15,
         )
         r.raise_for_status()
+        postings = r.json()
+        WATCHLIST_RAW[company_name] = {"postings": len(postings), "error": None}
         jobs = []
-        for p in r.json():
+        for p in postings:
             title = p.get("text", "")
             if not title_matches_any(title):
                 continue
             location = p.get("categories", {}).get("location", "")
+            if not _watchlist_location_ok(location):
+                continue
             # Lever's createdAt is epoch milliseconds
             created_ms = p.get("createdAt")
             posted_at = created_ms / 1000 if isinstance(created_ms, (int, float)) else None
@@ -1457,6 +1485,7 @@ def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list
         return jobs
     except Exception as e:
         print(f"  ⚠ Watchlist Lever ({company_name}): {e}")
+        WATCHLIST_RAW[company_name] = {"postings": 0, "error": str(e)[:120]}
         return []
 
 
@@ -1468,14 +1497,18 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
             timeout=15,
         )
         r.raise_for_status()
+        postings = r.json().get("jobs", [])
+        WATCHLIST_RAW[company_name] = {"postings": len(postings), "error": None}
         jobs = []
-        for p in r.json().get("jobs", []):
+        for p in postings:
             title = p.get("title", "")
             if not title_matches_any(title):
                 continue
             loc = p.get("location") or p.get("locationName") or ""
             if isinstance(loc, list):
                 loc = ", ".join(loc)
+            if not _watchlist_location_ok(loc):
+                continue
             jobs.append(_watchlist_job(
                 title, company_name,
                 p.get("jobUrl", base_url),
@@ -1485,6 +1518,7 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
         return jobs
     except Exception as e:
         print(f"  ⚠ Watchlist Ashby ({company_name}): {e}")
+        WATCHLIST_RAW[company_name] = {"postings": 0, "error": str(e)[:120]}
         return []
 
 
@@ -1496,12 +1530,16 @@ def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) ->
             timeout=15,
         )
         r.raise_for_status()
+        postings = r.json().get("jobs", [])
+        WATCHLIST_RAW[company_name] = {"postings": len(postings), "error": None}
         jobs = []
-        for p in r.json().get("jobs", []):
+        for p in postings:
             title = p.get("title", "")
             if not title_matches_any(title):
                 continue
             loc = p.get("location", {}).get("name", "") if isinstance(p.get("location"), dict) else ""
+            if not _watchlist_location_ok(loc):
+                continue
             jobs.append(_watchlist_job(
                 title, company_name,
                 p.get("absolute_url", base_url),
@@ -1511,6 +1549,7 @@ def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) ->
         return jobs
     except Exception as e:
         print(f"  ⚠ Watchlist Greenhouse ({company_name}): {e}")
+        WATCHLIST_RAW[company_name] = {"postings": 0, "error": str(e)[:120]}
         return []
 
 
@@ -1519,9 +1558,14 @@ def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+        anchors = soup.find_all("a", href=True)
+        # A careers page has no posting markup to count, so "did the page come
+        # back with links at all" is the only available liveness signal. Zero
+        # anchors means the page is empty or blocked, not that nothing is open.
+        WATCHLIST_RAW[company_name] = {"postings": len(anchors), "error": None}
         jobs = []
         seen_hrefs = set()
-        for a in soup.find_all("a", href=True):
+        for a in anchors:
             title = a.get_text(strip=True)
             if not title or not title_matches_any(title):
                 continue
@@ -1536,6 +1580,7 @@ def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]
         return jobs
     except Exception as e:
         print(f"  ⚠ Watchlist HTML ({company_name}): {e}")
+        WATCHLIST_RAW[company_name] = {"postings": 0, "error": str(e)[:120]}
         return []
 
 
@@ -1554,9 +1599,13 @@ def scrape_watchlist() -> list[dict]:
             jobs = _scrape_greenhouse_watchlist(url, name, tier)
         else:
             jobs = _scrape_html_watchlist(url, name, tier)
-        print(f"  · {name}: {len(jobs)} match(es)")
+        raw = WATCHLIST_RAW.get(name, {})
+        print(f"  · {name}: {len(jobs)} match(es) of {raw.get('postings', '?')} posting(s)"
+              + (f" [ERROR: {raw['error']}]" if raw.get("error") else ""))
         all_jobs.extend(jobs)
         time.sleep(0.5)
+
+    _record_raw("Watchlist", sum(c.get("postings", 0) for c in WATCHLIST_RAW.values()))
     return all_jobs
 
 
@@ -1597,20 +1646,72 @@ API_SOURCES = {"4DayWeek", "Himalayas", "Arbeitnow", "RemoteOK"}
 
 
 def _zero_result_reason(name: str) -> str:
-    if name == "Watchlist":
-        return "fetch succeeds — check whether a company moved ATS"
-    if name in API_SOURCES:
-        return "fetch succeeds — API returned nothing matching; check the query or its response shape"
-    return "fetch succeeds — selectors may be stale"
+    """Say which of the two zero-result cases this is.
+
+    Reading nothing and matching nothing are completely different problems and
+    used to produce identical text, which is why three of these alerts ran for
+    over a week with no way to act on them. The raw count separates them."""
+    raw = SOURCE_RAW_COUNTS.get(name)
+
+    if raw is None:
+        return "no listing count recorded — the source failed before parsing"
+
+    if raw == 0:
+        if name in API_SOURCES:
+            return ("BROKEN — the API returned 0 listings at all. The endpoint, "
+                    "its parameters or its response shape has changed")
+        if name == "Watchlist":
+            return "BROKEN — no company job board returned a single posting"
+        return ("BROKEN — 0 listings parsed from the page. The site's HTML "
+                "changed and the selectors no longer match")
+
+    return (f"source is HEALTHY — {raw} listings read, none matched the title "
+            f"and location filters. Nothing to fix unless you expected a match")
+
+
+def _watchlist_company_alerts(health: dict) -> list[str]:
+    """Per-company watchlist health.
+
+    The watchlist reports as one source, so a company whose board has gone dead
+    is invisible behind the twenty-nine that still work. The trigger is zero
+    postings of ANY kind — not zero matches, which is the normal state for a
+    company with no design role open."""
+    alerts = []
+    companies = health.setdefault("Watchlist", {}).setdefault("companies", {})
+    today_str = TODAY.isoformat()
+
+    for name, raw in WATCHLIST_RAW.items():
+        rec = companies.setdefault(name, {"dead_streak": 0, "last_ok": None, "last_error": None})
+        if raw.get("postings", 0) > 0 and not raw.get("error"):
+            rec["dead_streak"] = 0
+            rec["last_ok"] = today_str
+            rec["last_error"] = None
+            continue
+
+        rec["dead_streak"] = rec.get("dead_streak", 0) + 1
+        rec["last_error"] = raw.get("error")
+        if rec["dead_streak"] >= WATCHLIST_DEAD_DAYS:
+            detail = f": {raw['error']}" if raw.get("error") else " (board responded, but with no postings)"
+            alerts.append(
+                f"Watchlist · {name} — no postings for {rec['dead_streak']} days{detail}. "
+                f"Check the slug, or whether they moved ATS"
+            )
+    return alerts
 
 
 def apply_country_restriction(jobs: list[dict]) -> list[dict]:
-    """Tag (or drop) roles restricted to one European country other than Spain.
+    """Final pass over every job, whatever source it came from.
 
     Applied here rather than inside each scraper so there is one rule for all
-    ten sources instead of ten copies of it. See COUNTRY_RESTRICTED_MODE."""
+    ten sources instead of ten copies of it:
+      · drop anything blocked by the URL it sits on (the company-name check
+        inside each scraper cannot see ats.rippling.com)
+      · tag or drop roles restricted to one European country other than Spain
+        (see COUNTRY_RESTRICTED_MODE)"""
     out = []
     for j in jobs:
+        if is_blocked_company(j.get("company", ""), j.get("url", "")):
+            continue
         country = country_restriction(j.get("location", ""))
         if country and COUNTRY_RESTRICTED_MODE == "drop":
             continue
@@ -1660,6 +1761,8 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
                 )
 
         time.sleep(1)
+
+    alerts.extend(_watchlist_company_alerts(health))
 
     return all_jobs, health, alerts
 
@@ -1730,6 +1833,10 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
         badges += (f'<span style="display:inline-block;background:#fef2f2;color:#9f1239;'
                    f'font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;'
                    f'margin-right:5px;">📍 {j["country_flag"]} only — needs residency</span>')
+    if j.get("location_unknown"):
+        badges += ('<span style="display:inline-block;background:#f3f4f6;color:#4b5563;'
+                   'font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;'
+                   'margin-right:5px;">❓ Location not stated — check the posting</span>')
     if j.get("currency_flag") == "usd":
         badges += '<span style="display:inline-block;background:#fef2f2;color:#991b1b;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;margin-right:5px;">🇺🇸 USD — likely US hire</span>'
     if j.get("currency_flag") == "gbp":
@@ -1913,6 +2020,7 @@ def build_email(
       <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6;">
         🟢 4-day week &nbsp;|&nbsp; ⚠️ Verify location/hybrid &nbsp;|&nbsp;
         📍 Single country — needs residency there &nbsp;|&nbsp;
+        ❓ Location not stated on the listing &nbsp;|&nbsp;
         🔄 Repost — role still open &nbsp;|&nbsp;
         🔭 Stretch — Staff/Principal at smaller companies &nbsp;|&nbsp;
         🇺🇸 USD — likely US hire &nbsp;|&nbsp; 🇬🇧 GBP — verify eligibility &nbsp;|&nbsp;
@@ -2026,6 +2134,17 @@ def send_email(html: str, subject: str):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def ping_watchdog(status: str = ""):
+    """Tell the outside watchdog this run completed. Never fails the run."""
+    if not HEALTHCHECK_URL:
+        return
+    try:
+        requests.get(HEALTHCHECK_URL.rstrip("/") + (f"/{status}" if status else ""), timeout=10)
+        print("📡 Watchdog pinged.")
+    except Exception as e:
+        print(f"  ⚠ Watchdog ping failed (ignored): {e}")
+
+
 def main():
     print(f"\n{'='*52}")
     print(f"Job Scraper – {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -2033,6 +2152,14 @@ def main():
 
     seen   = load_seen()
     health = load_health()
+
+    # Two scheduled runs a day now, because GitHub's free scheduler drops a
+    # large share of them (10, 11 and 13 Sep 2026 never ran). Whichever fires
+    # first does the work; this stops the second one sending a duplicate.
+    if health.get("last_email_date") == TODAY.isoformat():
+        print("✅ Already sent today — nothing to do. (Second scheduled run.)")
+        ping_watchdog()
+        return
 
     # Auto-prune stale seen_jobs entries
     seen, pruned_count = prune_seen(seen)
@@ -2075,6 +2202,7 @@ def main():
         send_email(html, subject)
         health["last_email_date"] = TODAY.isoformat()
         save_health(health)
+        ping_watchdog()
         return
 
     # Nothing to report — check if silence-breaker is needed
@@ -2094,6 +2222,8 @@ def main():
         save_health(health)
     else:
         print(f"Nothing to report — no email sent ({days_silent} day(s) since last send).")
+
+    ping_watchdog()
 
 
 if __name__ == "__main__":
