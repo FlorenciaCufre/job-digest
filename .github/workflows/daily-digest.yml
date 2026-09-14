@@ -2,8 +2,18 @@ name: Daily Job Digest
 
 on:
   schedule:
-    # Every day at 07:30 UTC (09:30 Barcelona time)
-    - cron: "30 7 * * *"
+    # Two attempts a day, on purpose.
+    #
+    # GitHub's free scheduler does not guarantee that a scheduled run happens
+    # at all — under load it delays them by hours or drops them outright.
+    # Measured on this repo: the run did not happen on 10, 11 or 13 Sep 2026,
+    # three days out of six, and arrival time had slipped from ~08:00 UTC to
+    # as late as 18:06 UTC.
+    #
+    # Whichever attempt fires first does the work; scraper.py exits
+    # immediately if an email already went out today, so the second is free.
+    - cron: "30 6 * * *"
+    - cron: "30 11 * * *"
   workflow_dispatch:
 
 env:
@@ -40,6 +50,10 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
           EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
+          # Optional. Add a HEALTHCHECK_URL secret (healthchecks.io) and they
+          # will email you when a run goes missing. Leave it unset and the
+          # ping is simply skipped — nothing else changes.
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: python scraper.py
 
       - name: Save cache
