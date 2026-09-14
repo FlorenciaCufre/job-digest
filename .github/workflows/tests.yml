@@ -1,0 +1,27 @@
+name: Tests
+
+# Runs only when the filter code changes — never on the daily schedule, so a
+# failing test can never stop the digest going out. GitHub emails you if it
+# goes red.
+on:
+  push:
+    paths:
+      - "scraper.py"
+      - "test_location_filter.py"
+  workflow_dispatch:
+
+jobs:
+  location-filter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check the location filter
+        run: python test_location_filter.py
