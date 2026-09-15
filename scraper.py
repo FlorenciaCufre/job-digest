@@ -23,6 +23,7 @@ import hashlib
 import datetime
 import time
 import re
+import signal
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -61,6 +62,28 @@ ZERO_RESULT_ALERT_DAYS = 5  # consecutive 0-result days (fetch OK, no matches) b
 # moved ATS. Deliberately not "no matches": a company can legitimately have no
 # design role open for months, and alerting on that would be constant noise.
 WATCHLIST_DEAD_DAYS = 14
+
+# ── Time limits ──────────────────────────────────────────────────────────────
+#
+# On 15 September 2026 a scheduled run started at 11:58 UTC, produced no output
+# at all, and was still hanging 3h27m later when it was cancelled by hand. No
+# digest that day. The same signature — a run that starts and never finishes —
+# most likely explains 10, 11 and 13 September too.
+#
+# The cause is that `timeout` in requests is NOT a cap on total time. It limits
+# the gap between bytes. A server that dribbles one byte every few seconds, or
+# accepts a connection and then says nothing, holds the scraper forever. Sites
+# that throttle datacenter IPs (which is what a GitHub runner is) do exactly
+# this.
+#
+# So: a hard wall-clock limit per source, enforced with SIGALRM, which
+# interrupts a blocked socket read. A source that exceeds it raises, lands in
+# the existing exception handler, and is recorded as a fetch error — so it gets
+# reported through the health alerts you already have, the other sources still
+# run, and the digest still goes out.
+SOURCE_TIMEOUT_SECONDS    = 90    # any single source
+WATCHLIST_TIMEOUT_SECONDS = 300   # the watchlist is 30 companies, so it gets more
+HTTP_TIMEOUT              = (10, 20)   # (connect, read) per request
 
 # What to do with a role that is remote but restricted to ONE European country
 # other than Spain ("Remote, Poland" · "Portugal Remote" · "Germany (Remote)").
@@ -673,9 +696,57 @@ def age_color(date: datetime.date | None) -> str:
         return "#d97706"
     return "#9ca3af"
 
+# ── Hard wall-clock limit ────────────────────────────────────────────────────
+
+class SourceTimeout(Exception):
+    """A source exceeded its wall-clock budget and was abandoned."""
+
+
+class time_limit:
+    """Abandon whatever is running after `seconds`, whatever it is blocked on.
+
+    Uses SIGALRM, which interrupts a blocked socket read — the thing a plain
+    `requests` timeout cannot do, because that only limits the gap between
+    bytes. Falls back to doing nothing where SIGALRM does not exist (Windows)
+    or off the main thread; the runner is Linux, so in practice it always
+    applies.
+    """
+
+    def __init__(self, seconds: int, label: str = ""):
+        self.seconds, self.label = seconds, label
+        self.armed = False
+
+    def __enter__(self):
+        if not hasattr(signal, "SIGALRM") or self.seconds <= 0:
+            return self
+        try:
+            signal.signal(signal.SIGALRM, self._fire)
+            signal.alarm(self.seconds)
+            self.armed = True
+        except ValueError:
+            self.armed = False      # not the main thread — skip quietly
+        return self
+
+    def __exit__(self, *exc):
+        if self.armed:
+            signal.alarm(0)
+        return False
+
+    def _fire(self, signum, frame):
+        raise SourceTimeout(
+            f"no response within {self.seconds}s — abandoned"
+            + (f" ({self.label})" if self.label else "")
+        )
+
+
+def _timeout_for(source_name: str) -> int:
+    return (WATCHLIST_TIMEOUT_SECONDS if source_name == "Watchlist"
+            else SOURCE_TIMEOUT_SECONDS)
+
+
 # ── Fetch helper with retry ───────────────────────────────────────────────────
 
-def fetch(url: str, timeout: int = 15, retries: int = 1) -> BeautifulSoup | None:
+def fetch(url: str, timeout=HTTP_TIMEOUT, retries: int = 1) -> BeautifulSoup | None:
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, headers=HEADERS, timeout=timeout)
@@ -714,7 +785,7 @@ def scrape_4dayweek() -> list[dict]:
                     "limit":            100,
                     "page":             page,
                 },
-                timeout=15,
+                timeout=HTTP_TIMEOUT,
             )
             data = r.json()
             items = data.get("data", [])
@@ -816,7 +887,7 @@ def scrape_himalayas() -> list[dict]:
                         "offset":    offset,
                     },
                     headers=HEADERS,
-                    timeout=15,
+                    timeout=HTTP_TIMEOUT,
                 )
                 data = r.json()
                 items = data if isinstance(data, list) else data.get("jobs", [])
@@ -878,7 +949,7 @@ def scrape_arbeitnow() -> list[dict]:
             r = requests.get(
                 "https://www.arbeitnow.com/api/job-board-api",
                 params={"page": page},
-                timeout=15,
+                timeout=HTTP_TIMEOUT,
             )
             # Guard: empty or non-JSON body (happens on last page)
             if not r.content or not r.content.strip():
@@ -1245,7 +1316,7 @@ def scrape_remoteok() -> list[dict]:
             "https://remoteok.com/api",
             params={"tags": "design"},
             headers=HEADERS,
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         data = r.json()
@@ -1460,7 +1531,7 @@ def _scrape_lever_watchlist(base_url: str, company_name: str, tier: int) -> list
     try:
         r = requests.get(
             f"https://api.lever.co/v0/postings/{slug}?mode=json",
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         postings = r.json()
@@ -1494,7 +1565,7 @@ def _scrape_ashby_watchlist(base_url: str, company_name: str, tier: int) -> list
     try:
         r = requests.get(
             f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         postings = r.json().get("jobs", [])
@@ -1527,7 +1598,7 @@ def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) ->
     try:
         r = requests.get(
             f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         postings = r.json().get("jobs", [])
@@ -1555,7 +1626,7 @@ def _scrape_greenhouse_watchlist(base_url: str, company_name: str, tier: int) ->
 
 def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         anchors = soup.find_all("a", href=True)
@@ -1586,11 +1657,22 @@ def _scrape_html_watchlist(url: str, company_name: str, tier: int) -> list[dict]
 
 def scrape_watchlist() -> list[dict]:
     all_jobs = []
+    # Leave headroom under the source-level alarm so the loop can finish
+    # tidily rather than being cut off mid-company.
+    deadline = time.monotonic() + WATCHLIST_TIMEOUT_SECONDS - 30
+
     for company in WATCHLIST:
         name = company["name"]
         url  = company["url"]
         ats  = company["ats"]
         tier = company["tier"]
+
+        if time.monotonic() > deadline:
+            # Deliberately NOT recorded in WATCHLIST_RAW. A company we never
+            # asked about is unknown, not dead — recording a zero here would
+            # feed the 14-day dead-slug alert a false negative.
+            print(f"  · {name}: skipped, watchlist time budget spent", flush=True)
+            continue
         if ats == "lever":
             jobs = _scrape_lever_watchlist(url, name, tier)
         elif ats == "ashby":
@@ -1726,11 +1808,14 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     today_str = TODAY.isoformat()
 
     for name, fn in SCRAPERS:
-        print(f"→ {name}...")
+        budget = _timeout_for(name)
+        print(f"→ {name}... (limit {budget}s)", flush=True)
+        started = time.monotonic()
         try:
-            results = fn()
+            with time_limit(budget, name):
+                results = fn()
             results = apply_country_restriction(results)
-            print(f"  ✓ {len(results)} matching jobs")
+            print(f"  ✓ {len(results)} matching jobs in {time.monotonic()-started:.1f}s", flush=True)
             all_jobs.extend(results)
 
             h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0, "zero_result_streak": 0})
@@ -1752,7 +1837,8 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
                 h["zero_result_streak"] = 0
 
         except Exception as e:
-            print(f"  ✗ {name} failed: {e}")
+            kind = "TIMED OUT" if isinstance(e, SourceTimeout) else "failed"
+            print(f"  ✗ {name} {kind} after {time.monotonic()-started:.1f}s: {e}", flush=True)
             h = health.setdefault(name, {"last_fetch_date": None, "error_streak": 0, "zero_result_streak": 0})
             h["error_streak"] = h.get("error_streak", 0) + 1
             if h["error_streak"] >= ERROR_ALERT_DAYS:
@@ -2124,7 +2210,7 @@ def send_email(html: str, subject: str):
             "subject": subject,
             "html":    html,
         },
-        timeout=15,
+        timeout=HTTP_TIMEOUT,
     )
     if r.status_code == 200:
         print(f"✅ Email sent: {subject}")

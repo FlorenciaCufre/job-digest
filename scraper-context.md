@@ -50,6 +50,39 @@ Two attempts give each day two chances. Whichever fires first does the work —
 the second run costs nothing. **This buys more chances, not punctuality.** A
 reliably-timed digest means leaving GitHub Actions, which is not worth it.
 
+### Why every source has a time limit
+
+**On 15 September 2026 a run started at 11:58 UTC, printed nothing, and was
+still hanging 3h27m later.** No digest that day. The same signature — starts,
+never finishes — most likely explains 10, 11 and 13 September as well; a hung
+run never emails, never saves its counters and never increments a streak, which
+is indistinguishable from a run that never happened.
+
+The cause: `timeout` in `requests` is **not** a cap on total time. It limits the
+gap between bytes. A server that accepts the connection and then says nothing,
+or dribbles a byte every few seconds, holds the scraper forever. Sites that
+throttle datacenter IPs — which is what a GitHub runner is — behave exactly
+that way, and it also explains sources that return an empty challenge page on
+other days (a "healthy, 0 matched" alert).
+
+Three defences, innermost first:
+
+| Layer | Setting | What it does |
+|---|---|---|
+| Per request | `HTTP_TIMEOUT = (10, 20)` | connect and read limits |
+| Per source | `SOURCE_TIMEOUT_SECONDS = 90`, `WATCHLIST_TIMEOUT_SECONDS = 300` | SIGALRM interrupts a blocked socket read; the source raises, lands in the existing handler, is recorded as a fetch error, **and the other sources still run** |
+| Per job | `timeout-minutes: 20` in the workflow | backstop; nothing sits for six hours again |
+
+The watchlist also keeps its own deadline across the 30 companies, so one
+stalling company cannot spend the whole budget. Companies skipped that way are
+**not** recorded in `WATCHLIST_RAW` — a company never asked is unknown, not
+dead, and recording a zero would feed the 14-day dead-slug alert a false
+negative.
+
+`PYTHONUNBUFFERED: "1"` and `python -u` are set in the workflow. Without them
+Python buffers its output and a hang produces a completely empty log — which is
+why the 15 Sep failure gave no clue at all about which source was stuck.
+
 ### Why there is an outside watchdog
 
 The silence-breaker (`SILENCE_DAYS`) is computed *inside* the run, so it can
