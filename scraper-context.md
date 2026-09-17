@@ -1,6 +1,6 @@
 # Job Scraper – Project Context
 
-_Last updated: 14 September 2026. Verified against the code at commit `29f208b`._
+_Last updated: 16 September 2026. Verified against the code in this commit._
 
 **This file lives in the repo, next to `scraper.py`.** It used to live only in
 `Documents/Claude New/Scrapper/`, where it went four days stale without anyone
@@ -14,9 +14,9 @@ If you change the scraper, change this in the same commit.
 Runs from GitHub Actions and emails a filtered digest of Senior/Lead Product
 Designer roles.
 
-**Total sources:** 4 APIs (4DayWeek, Himalayas, Arbeitnow, RemoteOK) + 5 HTML
-scrapers (WeWorkRemotely, UXJobs, RemoteRebellion, RemoteInEurope,
-EURemoteJobs) + 30 watchlist companies.
+**Total sources:** 5 APIs (4DayWeek, Himalayas, Arbeitnow, RemoteOK, Jobicy)
++ 3 HTML scrapers (WeWorkRemotely, UXJobs, RemoteRebellion) + 30 watchlist
+companies.
 
 ---
 
@@ -71,7 +71,7 @@ Three defences, innermost first:
 |---|---|---|
 | Per request | `HTTP_TIMEOUT = (10, 20)` | connect and read limits |
 | Per source | `SOURCE_TIMEOUT_SECONDS = 90`, `WATCHLIST_TIMEOUT_SECONDS = 300` | SIGALRM interrupts a blocked socket read; the source raises, lands in the existing handler, is recorded as a fetch error, **and the other sources still run** |
-| Per job | `timeout-minutes: 20` in the workflow | backstop; nothing sits for six hours again |
+| Per run | `RUN_BUDGET_SECONDS = 600` | once spent, remaining sources are skipped and the digest is sent from what was collected — a partial digest beats none |
 
 The watchlist also keeps its own deadline across the 30 companies, so one
 stalling company cannot spend the whole budget. Companies skipped that way are
@@ -79,9 +79,15 @@ stalling company cannot spend the whole budget. Companies skipped that way are
 dead, and recording a zero would feed the 14-day dead-slug alert a false
 negative.
 
-`PYTHONUNBUFFERED: "1"` and `python -u` are set in the workflow. Without them
-Python buffers its output and a hang produces a completely empty log — which is
-why the 15 Sep failure gave no clue at all about which source was stuck.
+Line buffering is switched on at the top of `scraper.py` itself
+(`sys.stdout.reconfigure`). Without it Python buffers its output and a hang
+produces a completely empty log — which is why the 15 Sep failure gave no clue
+about which source was stuck.
+
+**Both of these live in `scraper.py` on purpose, not in the workflow file.**
+The workflow sits in a hidden folder that is awkward to edit and cannot be
+written to remotely, so keeping the knobs in the Python file means routine
+changes only ever touch one file.
 
 ### Why there is an outside watchdog
 
@@ -107,13 +113,11 @@ secret unset and the ping is skipped; nothing else changes.
 | **Himalayas** | Search API, paginated 20/page. Must run `Senior` and `Lead` as two separate requests — a comma-joined `seniority=senior,lead` silently returns empty (confirmed live, Aug 2026) |
 | **Arbeitnow** | Free API. Its `remote` boolean is unreliable — confirmed live Sep 2026 that explicitly remote-labeled titles come back `remote:false` while fixed-city onsite roles come back `remote:true`. Filter uses a broader signal instead: API flag OR "remote" in the title/location text, then `location_ok()` does the real filtering |
 | **RemoteOK** | Free public JSON feed (`remoteok.com/api?tags=design`), no auth, capped ~100 most-recent results, no pagination. Tags are noisy, so every posting still runs through the normal title filter |
+| **Jobicy** | Added 16 Sep 2026. `jobicy.com/api/v2/remote-jobs?industry=design-multimedia&geo=europe` — no key, no auth. Returns structured `jobTitle`, `companyName`, `jobGeo`, `jobLevel`, `pubDate`, optional salary. Replaced RemoteInEurope and EURemoteJobs |
 
 ### HTML scrapers (best-effort — break when sites redesign)
 
-WeWorkRemotely (RSS) · UXJobs · RemoteRebellion · RemoteInEurope · EURemoteJobs
-
-**EURemoteJobs:** `euremotejobs.com`, server-rendered. Cards are `.job-card`
-wrapped in a parent `<a href>`, paginated via `?paged=N`, capped at 3 pages/run.
+WeWorkRemotely (RSS) · UXJobs · RemoteRebellion
 
 **UXJobs:** scrapes `jobs.uxjobs.io/remote-product-designer-jobs/`. Country flag
 emoji are a fast pre-check only — the real location text always runs through
@@ -128,6 +132,11 @@ landed 4 Sep and nothing from that domain has appeared since.
 - **WorkingNomads, Nodesk, TrulyRemote, DynamiteJobs** — JS-rendered SPAs;
   requests+BeautifulSoup only ever sees the page shell
 - **UIUXDesignerJobs** — domain dead
+- **RemoteInEurope, EURemoteJobs** — removed 16 Sep 2026. Both reported
+  **BROKEN** by the health check in the 15 Sep digest: "0 listings parsed from
+  the page" for 10 and 8 consecutive days running. Their HTML changed and the
+  selectors match nothing. This is the health alert working as designed — it
+  named which two were dead and cleared RemoteOK in the same email
 - Earlier round: DailyRemote · RemotifyEurope · RemoteRocketship · FreshRemote ·
   StartupJobs · SmoothRemote · Rows (403/404/DNS)
 

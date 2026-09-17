@@ -18,6 +18,7 @@ Email footer includes manual check links:
 """
 
 import os
+import sys
 import json
 import hashlib
 import datetime
@@ -25,6 +26,19 @@ import time
 import re
 import signal
 import requests
+
+# Write every line to the log as it happens.
+#
+# Python buffers its output when it is not writing to a terminal, so on
+# 15 September 2026 a run that hung for 3h27m produced a completely empty log
+# and there was no way to see which source it was stuck on. Doing this here,
+# rather than with PYTHONUNBUFFERED in the workflow, means the workflow file
+# never has to be edited for it.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 from bs4 import BeautifulSoup
 from pathlib import Path
 from dateutil import parser as dateparser
@@ -84,6 +98,15 @@ WATCHLIST_DEAD_DAYS = 14
 SOURCE_TIMEOUT_SECONDS    = 90    # any single source
 WATCHLIST_TIMEOUT_SECONDS = 300   # the watchlist is 30 companies, so it gets more
 HTTP_TIMEOUT              = (10, 20)   # (connect, read) per request
+
+# Whole-run budget. Once this is spent, remaining sources are skipped and the
+# digest is built and sent from whatever was collected — a partial digest beats
+# no digest. Checked between sources, so the true worst case is this plus one
+# source's budget.
+#
+# Lives here rather than as `timeout-minutes` in the workflow so that the
+# workflow file never needs editing for it.
+RUN_BUDGET_SECONDS = 600
 
 # What to do with a role that is remote but restricted to ONE European country
 # other than Spain ("Remote, Poland" · "Portugal Remote" · "Germany (Remote)").
@@ -334,6 +357,14 @@ def location_country_ok(location: str) -> bool:
     if not norm:
         return True
 
+    # Same principle as location_ok(): if a broad in-scope region is named, the
+    # other regions are extra reach. This guard matters because "worldwide" and
+    # "anywhere" are filler words below — without it, "Worldwide, USA" has its
+    # only in-scope word stripped and then reads as a pure US role.
+    tokens = set(norm.split())
+    if tokens & BROAD_REGION_TOKENS or tokens & SPAIN_TOKENS:
+        return True
+
     bare = " ".join(t for t in norm.split() if t not in _LOC_FILLER).strip()
     if not bare:
         return True
@@ -552,11 +583,34 @@ def location_ok(location: str) -> bool:
     loc = _norm_loc(location)
     if not loc:
         return True
-    if any(ex in loc for ex in _EXCLUDE_LOCATION_NORM):
-        return False
-    if _EXCLUDE_LOCATION_TOKENS & set(loc.split()):
-        return False
+
+    # A role listing SEVERAL regions, one of which is in scope, is open to her —
+    # more open, not less. The old rule asked "is anything here disqualifying?"
+    # and so binned "Europe, USA" and "APAC, LATAM, Canada, Europe" because the
+    # US and Canada were mentioned, with Europe sitting right there in the same
+    # string. Those were dropped silently and never appeared in a digest, which
+    # is why it went unnoticed until a source that writes locations as explicit
+    # lists (Jobicy) made it visible.
+    #
+    # So: if an in-scope region is named, the other regions are extra reach, not
+    # a disqualification.
+    tokens = set(loc.split())
+    names_in_scope = bool(tokens & BROAD_REGION_TOKENS or tokens & SPAIN_TOKENS)
+
+    if not names_in_scope:
+        if any(ex in loc for ex in _EXCLUDE_LOCATION_NORM):
+            return False
+        if _EXCLUDE_LOCATION_TOKENS & tokens:
+            return False
+
     if not any(kw in loc for kw in LOCATION_KEYWORDS):
+        # A bare European country ("France", "Hungary", "Remote, PL") has no
+        # keyword to match, so it used to be dropped without a word. That
+        # contradicted COUNTRY_RESTRICTED_MODE, which exists precisely so these
+        # are shown and badged rather than vanishing. Let it through; the
+        # 📍 badge marks it and it sorts to the bottom.
+        if country_restriction(location):
+            return True
         return False
     # "Remote <Country>" needs the country read, not just the word "remote".
     # Previously only the three sources added on 4 Sep 2026 called this; every
@@ -1234,70 +1288,6 @@ def scrape_remoterebellion() -> list[dict]:
     return jobs
 
 
-def scrape_remoteineurope() -> list[dict]:
-    """remoteineurope.com — each posting is an <a class="card job"> itself
-    (not a wrapper around a link), with clean sub-elements for title,
-    company, and location. The site is EU-scoped by design (its whole
-    premise is "remote jobs in Europe"), so the location tag is often just
-    the continent "Europe" rather than a specific country.
-    """
-    jobs = []
-    seen_urls = set()
-    for category in ("design", "product"):
-        soup = fetch(f"https://remoteineurope.com/categories/{category}")
-        if not soup:
-            continue
-
-        cards = soup.select("a.card.job")
-        _record_raw("RemoteInEurope", len(cards), add=True)
-
-        for card in cards:
-            href = card.get("href", "")
-            if href in seen_urls:
-                continue
-
-            title_el = card.select_one("h3.title.card-job, .title.card-job")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            if not title_matches_any(title):
-                continue
-
-            company_el = card.select_one(".job-content .card-link.homepage")
-            company = company_el.get_text(strip=True) if company_el else ""
-            if is_blocked_company(company):
-                continue
-
-            loc_el = card.select_one(".card-short-location-wrapper .short-location")
-            location = loc_el.get_text(strip=True) if loc_el else "Europe"
-            if not location_ok(location) or not location_country_ok(location):
-                continue
-
-            seen_urls.add(href)
-            url_full = href if href.startswith("http") else f"https://remoteineurope.com{href}"
-            date_el = card.select_one(".date-text")
-            raw_date = date_el.get_text(strip=True) if date_el else None
-            age_label, age_date = parse_age(raw_date)
-
-            jobs.append({
-                "title":         title,
-                "company":       company,
-                "location":      location,
-                "salary":        "",
-                "url":           url_full,
-                "source":        "RemoteInEurope",
-                "four_day":      False,
-                "spain_flag":    is_spain_only(location),
-                "currency_flag": "",
-                "age_label":     age_label,
-                "age_date":      age_date,
-                "is_stretch":    title_is_stretch(title),
-            })
-        time.sleep(0.5)
-
-    return jobs
-
-
 def scrape_remoteok() -> list[dict]:
     """remoteok.com/api — free public JSON feed, no auth, capped at ~100
     most-recent results per request (no pagination on the free tier).
@@ -1366,71 +1356,77 @@ def scrape_remoteok() -> list[dict]:
     return jobs
 
 
-def scrape_euremotejobs() -> list[dict]:
-    """euremotejobs.com — confirmed server-rendered (job data is present in
-    the raw HTML, not JS-injected). Each posting is a <div class="job-card">
-    wrapped in a parent <a href>. Paginated via ?paged=N, capped at 3 pages
-    (~120 postings) per run to keep the request count sane.
+def scrape_jobicy() -> list[dict]:
+    """jobicy.com public API — no key, no auth, no scraping.
+
+    Added 16 Sep 2026 to replace RemoteInEurope and EURemoteJobs, both of which
+    the health check confirmed BROKEN (0 listings parsed for 8–10 days). This
+    is an API rather than an HTML scrape, so it cannot fail the same way.
+
+    Returns structured fields: jobTitle, companyName, jobGeo, jobLevel,
+    jobExcerpt, pubDate, and optional salary. `jobGeo` is written as an
+    explicit list — "Europe, USA", "Bulgaria, Cyprus, Poland" — which is what
+    exposed the multi-region hole in location_ok() above.
     """
     jobs = []
-    seen_urls = set()
-    for page in range(1, 4):
-        soup = fetch(f"https://euremotejobs.com/jobs/?search_keywords=design&paged={page}")
-        if not soup:
-            break
+    try:
+        r = requests.get(
+            "https://jobicy.com/api/v2/remote-jobs",
+            params={"count": 50, "industry": "design-multimedia", "geo": "europe"},
+            headers=HEADERS,
+            timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"  ⚠ Jobicy error: {e}")
+        return jobs
 
-        cards = soup.select(".job-card")
-        _record_raw("EURemoteJobs", len(cards), add=True)
-        if not cards:
-            break
+    postings = data.get("jobs", []) if isinstance(data, dict) else []
+    _record_raw("Jobicy", len(postings))
 
-        for card in cards:
-            title_el = card.select_one(".job-title")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            if not title_matches_any(title):
-                continue
+    for p in postings:
+        title = p.get("jobTitle", "")
+        if not title_matches_any(title):
+            continue
+        company = p.get("companyName", "")
+        url = p.get("url", "")
+        if is_blocked_company(company, url):
+            continue
 
-            link_el = card.find_parent("a", href=True)
-            href = link_el["href"] if link_el else ""
-            if not href or href in seen_urls:
-                continue
-            seen_urls.add(href)
+        location = p.get("jobGeo", "") or "Remote"
+        if not location_ok(location):
+            continue
 
-            company_el = card.select_one(".company-name")
-            company = company_el.get_text(strip=True) if company_el else ""
-            if is_blocked_company(company):
-                continue
+        description = f"{p.get('jobExcerpt','')} {p.get('jobDescription','')}"
+        if is_us_description(description):
+            continue
 
-            loc_el = card.select_one(".meta-location")
-            location = loc_el.get_text(strip=True) if loc_el else "Europe"
-            if not location_ok(location) or not location_country_ok(location):
-                continue
+        lo, hi = p.get("salaryMin"), p.get("salaryMax")
+        cur = p.get("salaryCurrency", "") or ""
+        if lo and hi:
+            salary = f"{cur} {int(lo):,} – {int(hi):,}"
+        elif lo:
+            salary = f"{cur} {int(lo):,}+"
+        else:
+            salary = ""
+        salary = sanitise_salary(salary)
 
-            time_el = card.select_one("time[datetime]")
-            raw_date = time_el["datetime"] if time_el and time_el.has_attr("datetime") else None
-            age_label, age_date = parse_age(raw_date)
-
-            jobs.append({
-                "title":         title,
-                "company":       company,
-                "location":      location,
-                "salary":        "",
-                "url":           href,
-                "source":        "EURemoteJobs",
-                "four_day":      False,
-                "spain_flag":    is_spain_only(location),
-                "currency_flag": "",
-                "age_label":     age_label,
-                "age_date":      age_date,
-                "is_stretch":    title_is_stretch(title),
-            })
-
-        if len(cards) < 40:
-            break
-        time.sleep(0.5)
-
+        age_label, age_date = parse_age(p.get("pubDate"))
+        jobs.append({
+            "title":         title,
+            "company":       company,
+            "location":      location,
+            "salary":        salary,
+            "url":           url,
+            "source":        "Jobicy",
+            "four_day":      False,
+            "spain_flag":    is_spain_only(location),
+            "currency_flag": currency_flag(salary),
+            "age_label":     age_label,
+            "age_date":      age_date,
+            "is_stretch":    title_is_stretch(title),
+        })
     return jobs
 
 
@@ -1706,16 +1702,23 @@ def scrape_watchlist() -> list[dict]:
 #                       need a headless browser to scrape; moved to manual-check.
 #   UIUXDesignerJobs  — domain appears dead (empty page, no content at all).
 #                       Dropped entirely, not worth a manual-check link.
+#   RemoteInEurope,
+#   EURemoteJobs      — removed 16 Sep 2026. Both reported BROKEN by the health
+#                       check in the 15 Sep digest: "0 listings parsed from the
+#                       page" for 10 and 8 consecutive days. Their HTML changed
+#                       and the selectors no longer match anything. Replaced by
+#                       Jobicy, which is an API and cannot break this way.
+#                       RemoteOK was checked at the same time and came back
+#                       HEALTHY — 100 listings read, none matched — so it stays.
 SCRAPERS = [
     ("4DayWeek",         scrape_4dayweek),
     ("Himalayas",        scrape_himalayas),
     ("Arbeitnow",        scrape_arbeitnow),
+    ("Jobicy",           scrape_jobicy),
     ("WeWorkRemotely",   scrape_weworkremotely),
     ("UXJobs",           scrape_uxjobs),
     ("RemoteRebellion",  scrape_remoterebellion),
-    ("RemoteInEurope",   scrape_remoteineurope),
     ("RemoteOK",         scrape_remoteok),
-    ("EURemoteJobs",     scrape_euremotejobs),
     ("Watchlist",        scrape_watchlist),
 ]
 
@@ -1724,7 +1727,7 @@ SCRAPERS = [
 # something different. (Arbeitnow spent Aug–Sep 2026 alerting about selectors
 # it does not have; the actual bug was its `remote` boolean returning
 # backwards.) Everything not listed here is an HTML scrape.
-API_SOURCES = {"4DayWeek", "Himalayas", "Arbeitnow", "RemoteOK"}
+API_SOURCES = {"4DayWeek", "Himalayas", "Arbeitnow", "RemoteOK", "Jobicy"}
 
 
 def _zero_result_reason(name: str) -> str:
@@ -1807,7 +1810,16 @@ def collect_all_jobs(health: dict) -> tuple[list[dict], dict, list[str]]:
     alerts   = []
     today_str = TODAY.isoformat()
 
+    run_deadline = time.monotonic() + RUN_BUDGET_SECONDS
+
     for name, fn in SCRAPERS:
+        if time.monotonic() > run_deadline:
+            # Skipped, not judged — nothing is written to health, so a source
+            # we never asked about cannot trip a zero-result alert.
+            print(f"→ {name}... SKIPPED, run budget spent", flush=True)
+            alerts.append(f"{name} — skipped, the run ran out of time before reaching it")
+            continue
+
         budget = _timeout_for(name)
         print(f"→ {name}... (limit {budget}s)", flush=True)
         started = time.monotonic()

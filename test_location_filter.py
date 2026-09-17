@@ -30,6 +30,25 @@ CASES = [
     ("Remote, Canada",          False, ""),
     ("United Kingdom",          False, ""),
 
+    # ── Multi-region: an in-scope region means it IS open to her ─────────
+    # Real jobGeo strings from Jobicy, 16 Sep 2026. All of these were being
+    # dropped silently because an out-of-scope region was also listed.
+    ("Europe, USA",                   True,  ""),
+    ("APAC, LATAM, Canada, Europe",   True,  ""),
+    ("Europe, Türkiye",               True,  ""),
+    ("EMEA, Americas",                True,  ""),
+    ("Remote - UK, Europe",           True,  ""),
+    ("Worldwide, USA",                True,  ""),
+
+    # ...but a region list with nothing in scope is still out
+    ("USA, Canada",                   False, ""),
+    ("Remote - USA, LATAM",           False, ""),
+
+    # ── Bare European country: shown and badged, not silently dropped ────
+    ("France",                        True,  "France"),
+    ("Hungary",                       True,  "Hungary"),
+    ("Bulgaria, Cyprus, Poland",      True,  "Bulgaria / Cyprus / Poland"),
+
     # ── Must keep passing, unflagged ─────────────────────────────────────
     ("Remote",                  True,  ""),
     ("EMEA",                    True,  ""),
@@ -114,6 +133,56 @@ WATCHLIST_CASES = [
 ]
 
 
+# ── Jobicy parsing ───────────────────────────────────────────────────────────
+# Real response shape from jobicy.com/api/v2/remote-jobs, 16 Sep 2026.
+JOBICY_PAYLOAD = {"jobs": [
+    {"jobTitle": "Staff Product Designer", "companyName": "OpenSea", "jobGeo": "Europe, USA",
+     "url": "https://jobicy.com/j/1", "pubDate": "2026-09-15", "jobExcerpt": ""},
+    {"jobTitle": "Senior Product Designer", "companyName": "Kinsta", "jobGeo": "Hungary",
+     "url": "https://jobicy.com/j/2", "pubDate": "2026-09-15", "jobExcerpt": ""},
+    {"jobTitle": "Senior Product Designer", "companyName": "Ashby", "jobGeo": "USA",
+     "url": "https://jobicy.com/j/3", "pubDate": "2026-09-15", "jobExcerpt": ""},
+    {"jobTitle": "Marketing Designer", "companyName": "Playson", "jobGeo": "Europe",
+     "url": "https://jobicy.com/j/4", "pubDate": "2026-09-15", "jobExcerpt": ""},
+    {"jobTitle": "Senior Product Designer", "companyName": "Acme", "jobGeo": "Europe",
+     "url": "https://jobicy.com/j/5", "pubDate": "2026-09-15", "jobExcerpt": "",
+     "salaryMin": 60000, "salaryMax": 80000, "salaryCurrency": "EUR"},
+]}
+
+
+class _FakeJobicyResponse:
+    status_code = 200
+    def raise_for_status(self): pass
+    def json(self): return JOBICY_PAYLOAD
+
+
+def check_jobicy(failures):
+    original = s.requests.get
+    s.requests.get = lambda url, **kw: _FakeJobicyResponse()
+    try:
+        jobs = s.scrape_jobicy()
+    finally:
+        s.requests.get = original
+
+    got = {(j["company"], j["location"]) for j in jobs}
+    expected = {
+        ("OpenSea", "Europe, USA"),   # multi-region including Europe — was being dropped
+        ("Kinsta",  "Hungary"),       # single country — shown and badged, not dropped
+        ("Acme",    "Europe"),
+    }
+    if got != expected:
+        failures.append(f"scrape_jobicy returned {sorted(got)}, expected {sorted(expected)}")
+
+    if s.SOURCE_RAW_COUNTS.get("Jobicy") != len(JOBICY_PAYLOAD["jobs"]):
+        failures.append("scrape_jobicy did not record its raw listing count")
+
+    salaried = [j for j in jobs if j["company"] == "Acme"]
+    if not salaried or "60,000" not in salaried[0]["salary"]:
+        failures.append(f"scrape_jobicy lost the salary: {salaried and salaried[0]['salary']!r}")
+
+    return 3   # number of checks above
+
+
 def main():
     failures = []
     for loc, want_ok, want_country in CASES:
@@ -156,8 +225,10 @@ def main():
             f"watchlist job with no location invented one: {job['location']!r}"
         )
 
+    jobicy_checks = check_jobicy(failures)
+
     total = (len(CASES) * 2 + len(TITLE_CASES) + len(BLOCKLIST_CASES)
-             + len(WATCHLIST_CASES) + 2)
+             + len(WATCHLIST_CASES) + 2 + jobicy_checks)
     for f in failures:
         print("FAIL:", f)
     print(f"\n{total - len(failures)}/{total} checks passed.")
