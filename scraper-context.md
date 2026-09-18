@@ -1,6 +1,6 @@
 # Job Scraper – Project Context
 
-_Last updated: 16 September 2026. Verified against the code in this commit._
+_Last updated: 18 September 2026. Verified against the code in this commit._
 
 **This file lives in the repo, next to `scraper.py`.** It used to live only in
 `Documents/Claude New/Scrapper/`, where it went four days stale without anyone
@@ -265,8 +265,14 @@ through. It strips filler and reads the country on either side, so `Remote US`,
 one country: `Remote, Poland` · `Remote, PL` · `Portugal Remote` ·
 `Germany (Remote)`. All four reached real digests.
 
-Default `"flag"` — badged `📍 <Country> only — needs residency` and sorted to
-the bottom. Set to `"drop"` for a hard exclude.
+**Currently `"drop"` — set 18 September 2026.** Flagging was the right first
+step: these roles had been vanishing silently and needed to be seen before being
+judged. They were. On 18 Sep four of six roles were single-country ones Flor
+cannot take, three of them the *same* EverAI job posted once each for Italy,
+Germany and France. The badge had done its job; what remained was noise.
+
+Set back to `"flag"` for a week if the digest ever looks too thin — the badge
+and the header pill are still wired up and will simply start appearing again.
 
 Never fires when the location names Spain, or a broad region (EMEA, Europe,
 International). ISO-2 codes are matched only where unambiguous — `de`, `fr`,
@@ -294,6 +300,13 @@ owner.com · deepgram · pinterest · clickup · happyco · vercel
 ---
 
 ## Email features
+
+**The company line.** It reads `**Company** · Location`, company bold and dark,
+location lighter. Both halves used to be styled identically, which is unreadable
+when the company is named after a place: on 18 Sep 2026 remote.com hiring for
+EMEA rendered as "Remote · EMEA", which looks like the location field saying
+"Remote" and then contradicting itself. Nothing was wrong with the data. A name
+in `AMBIGUOUS_COMPANY_NAMES` is now also spelled out — "Remote (the company)".
 
 | Badge | Meaning |
 |---|---|

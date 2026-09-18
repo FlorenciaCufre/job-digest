@@ -114,7 +114,14 @@ RUN_BUDGET_SECONDS = 600
 # they are not applicable from Barcelona.
 #   "flag" — show them, badged and sorted to the bottom (default)
 #   "drop" — hard-exclude them, same as a US role
-COUNTRY_RESTRICTED_MODE = "flag"
+#
+# Set to "drop" on 18 Sep 2026. Flagging was the right first step — these roles
+# had been disappearing silently and needed to be seen before being judged. Now
+# they have been: on 18 Sep four of six roles were single-country ones Flor
+# cannot take, three of them the same EverAI job posted once each for Italy,
+# Germany and France. The badge had done its job; what was left was noise.
+# Flip back to "flag" for a week if the digest ever looks too thin.
+COUNTRY_RESTRICTED_MODE = "drop"
 
 # Primary roles — shown in main section
 TITLE_KEYWORDS = [
@@ -421,6 +428,16 @@ def title_location_excluded(title: str) -> bool:
         return True
     words = set(norm.split())
     return bool(words & TITLE_TIMEZONE_TOKENS or words & TITLE_EXCLUDE_TOKENS)
+
+
+# Company names that are also location words. Spelled out in the email so the
+# company line cannot be misread as the location. "Remote" is a real company —
+# remote.com, the global employment platform — and it hires designers, so this
+# is not hypothetical.
+AMBIGUOUS_COMPANY_NAMES = {
+    "remote", "anywhere", "global", "worldwide", "europe", "international",
+    "hybrid", "onsite", "nomad", "distributed",
+}
 
 
 # Companies known to hire US-only despite listing "Remote" or "Anywhere in the World".
@@ -1954,6 +1971,19 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
     if j.get("salary"):
         salary_html = f'<span style="color:#059669;font-size:12px;">💰 {j["salary"]}</span> &nbsp; '
 
+    # The company line used to read "{company} · {location}" with both halves
+    # styled identically, which is unreadable when the company is named after a
+    # place or a way of working. Real case, 18 Sep 2026: remote.com hiring for
+    # EMEA rendered as "Remote · EMEA", which looks like the location field
+    # saying "Remote" and then contradicting itself. Nothing was wrong with the
+    # data — only with telling the two fields apart.
+    #
+    # The company is now bold and dark, the location lighter, and a name that
+    # doubles as a location word is spelled out.
+    company_display = j.get("company", "")
+    if _norm_loc(company_display) in AMBIGUOUS_COMPANY_NAMES:
+        company_display = f"{company_display} (the company)"
+
     return f"""
     <tr>
       <td style="padding:10px 0 16px;border-bottom:1px solid #f3f4f6;">
@@ -1961,8 +1991,8 @@ def _job_card_html(j: dict, is_repost: bool = False) -> str:
         <a href="{j['url']}" style="font-size:15px;font-weight:600;color:#111827;text-decoration:none;line-height:1.3;">
           {j['title']}
         </a><br>
-        <span style="font-size:13px;color:#6b7280;">
-          {j['company']} &nbsp;·&nbsp; {j['location']}
+        <span style="font-size:13px;">
+          <strong style="color:#374151;">{company_display}</strong><span style="color:#d1d5db;"> &nbsp;·&nbsp; </span><span style="color:#6b7280;">{j['location']}</span>
         </span><br>
         <div style="margin-top:4px;">
           {salary_html}{age_html}

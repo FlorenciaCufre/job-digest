@@ -167,7 +167,8 @@ def check_jobicy(failures):
     got = {(j["company"], j["location"]) for j in jobs}
     expected = {
         ("OpenSea", "Europe, USA"),   # multi-region including Europe — was being dropped
-        ("Kinsta",  "Hungary"),       # single country — shown and badged, not dropped
+        ("Kinsta",  "Hungary"),       # the source still returns it; the digest
+                                      # drops it later (COUNTRY_RESTRICTED_MODE)
         ("Acme",    "Europe"),
     }
     if got != expected:
@@ -181,6 +182,65 @@ def check_jobicy(failures):
         failures.append(f"scrape_jobicy lost the salary: {salaried and salaried[0]['salary']!r}")
 
     return 3   # number of checks above
+
+
+# ── The 18 September 2026 digest, replayed ───────────────────────────────────
+# Four of six roles that day were single-country ones Flor cannot take, three of
+# them the same EverAI job posted once per country. COUNTRY_RESTRICTED_MODE is
+# now "drop", so only the two applicable ones should survive.
+SEPT18_ROLES = [
+    ("Remote",      "EMEA",                                        True),
+    ("Miaplaza",    "Remote",                                      True),
+    ("EverAI",      "Italy",                                       False),
+    ("EverAI",      "Germany",                                     False),
+    ("EverAI",      "France",                                      False),
+    ("capital.com", "Bulgaria, Cyprus, Poland, Portugal, Serbia",   False),
+]
+
+
+def check_presentation(failures):
+    checks = 0
+
+    # 1. The mode is actually "drop", and dropping works.
+    checks += 1
+    if s.COUNTRY_RESTRICTED_MODE != "drop":
+        failures.append(f"COUNTRY_RESTRICTED_MODE is {s.COUNTRY_RESTRICTED_MODE!r}, expected 'drop'")
+
+    jobs = [{"title": "Senior Product Designer", "company": c, "location": loc, "url": "https://x.co/1",
+             "source": "Jobicy", "four_day": False, "spain_flag": False, "currency_flag": "",
+             "age_label": "Today", "age_date": None, "is_stretch": False, "salary": ""}
+            for c, loc, _ in SEPT18_ROLES]
+    kept = {j["company"] for j in s.apply_country_restriction(jobs)}
+    expected = {c for c, _, keep in SEPT18_ROLES if keep}
+    checks += 1
+    if kept != expected:
+        failures.append(f"18 Sep replay kept {sorted(kept)}, expected {sorted(expected)}")
+
+    # 2. A company named after a place is spelled out, and the two fields are
+    #    visually distinct.
+    card = s._job_card_html({"title": "Senior Product Designer", "company": "Remote",
+                             "location": "EMEA", "url": "https://x.co/1", "source": "Jobicy",
+                             "four_day": False, "spain_flag": False, "currency_flag": "",
+                             "age_label": "Today", "age_date": None, "is_stretch": False,
+                             "salary": ""})
+    checks += 1
+    if "Remote (the company)" not in card:
+        failures.append("a company named 'Remote' is not spelled out in the card")
+    checks += 1
+    if "<strong" not in card.split("EMEA")[0].split("</a>")[-1]:
+        failures.append("the company name is not visually distinguished from the location")
+
+    # 3. An ordinary company name is left alone.
+    plain = s._job_card_html({"title": "Senior Product Designer", "company": "Miaplaza",
+                              "location": "Remote", "url": "https://x.co/2", "source": "UXJobs",
+                              "four_day": False, "spain_flag": False, "currency_flag": "",
+                              "age_label": "Today", "age_date": None, "is_stretch": False,
+                              "salary": ""})
+    checks += 1
+    if "(the company)" in plain:
+        failures.append("an ordinary company name was needlessly annotated")
+
+    return checks
 
 
 def main():
@@ -226,9 +286,10 @@ def main():
         )
 
     jobicy_checks = check_jobicy(failures)
+    presentation_checks = check_presentation(failures)
 
     total = (len(CASES) * 2 + len(TITLE_CASES) + len(BLOCKLIST_CASES)
-             + len(WATCHLIST_CASES) + 2 + jobicy_checks)
+             + len(WATCHLIST_CASES) + 2 + jobicy_checks + presentation_checks)
     for f in failures:
         print("FAIL:", f)
     print(f"\n{total - len(failures)}/{total} checks passed.")
